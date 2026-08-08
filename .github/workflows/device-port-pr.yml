@@ -104,14 +104,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl unzip tar make clang llvm lz4 python3-pip kmod \
-            linux-tools-common linux-tools-generic linux-tools-$(uname -r) || \
-          sudo apt-get install -y curl unzip tar make clang llvm lz4 python3-pip kmod \
-            linux-tools-common linux-tools-generic
+            git gcc libelf-dev zlib1g-dev
 
       - name: Install porter
         run: |
           python3 -m pip install ./porter[lz4]
           python3 -m pip install vmlinux-to-elf pyelftools
+
+      - name: Build standalone bpftool
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
+          git -C linux-src sparse-checkout set tools/bpf/bpftool tools/lib/bpf tools/include scripts
+          make -C linux-src/tools/bpf/bpftool -j"$(nproc)"
+          echo "BPFTOOL=$PWD/linux-src/tools/bpf/bpftool/bpftool" >> "$GITHUB_ENV"
 
       - name: Install Android NDK
         run: |
@@ -177,10 +183,6 @@ jobs:
           llvm-objdump --disassemble-symbols=worker_thread \
             ".work/${{ inputs.profile }}/vmlinux.elf" \
             > ".work/${{ inputs.profile }}/worker_thread.objdump" || true
-          BPFTOOL="$(command -v bpftool || true)"
-          if [ -z "$BPFTOOL" ]; then
-            BPFTOOL="$(find /usr/lib/linux-tools-* -name bpftool -type f 2>/dev/null | sort -V | tail -n 1 || true)"
-          fi
           if [ -n "$BPFTOOL" ] && [ -f ".work/${{ inputs.profile }}/vmlinux.btf" ]; then
             "$BPFTOOL" btf dump file ".work/${{ inputs.profile }}/vmlinux.btf" format raw \
               > ".work/${{ inputs.profile }}/vmlinux-btf.raw"

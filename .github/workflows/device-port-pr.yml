@@ -1,4 +1,4 @@
-name: Device port PR
+name: Device Port PR
 
 on:
   workflow_dispatch:

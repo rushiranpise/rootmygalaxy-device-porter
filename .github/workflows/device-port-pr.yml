@@ -44,6 +44,10 @@ on:
         description: require raw BTF extraction; set false for documented no-BTF legacy ports
         required: true
         default: "true"
+      require_analysis_artifacts:
+        description: require recovered vmlinux nm/BTF/KernelSU audit artifacts
+        required: true
+        default: "false"
       probe_offset:
         description: P0 probe offset for p0_fingerprint.h
         required: true
@@ -153,6 +157,10 @@ jobs:
           rmg-port extract-btf \
             --kernel ".work/${{ inputs.profile }}/kernel" \
             --out ".work/${{ inputs.profile }}/vmlinux.btf" || true
+          if command -v bpftool >/dev/null 2>&1 && [ -f ".work/${{ inputs.profile }}/vmlinux.btf" ]; then
+            bpftool btf dump file ".work/${{ inputs.profile }}/vmlinux.btf" format raw \
+              > ".work/${{ inputs.profile }}/vmlinux-btf.raw"
+          fi
           rmg-port gen-p0 \
             --kernel ".work/${{ inputs.profile }}/kernel" \
             --probe-offset "${{ inputs.probe_offset }}" \
@@ -199,6 +207,7 @@ jobs:
         env:
           PRESERVE_EXISTING_FEED_METADATA: ${{ inputs.preserve_existing_feed_metadata }}
           REQUIRE_BTF: ${{ inputs.require_btf }}
+          REQUIRE_ANALYSIS_ARTIFACTS: ${{ inputs.require_analysis_artifacts }}
         run: |
           preserve_arg=""
           if [ "$PRESERVE_EXISTING_FEED_METADATA" = "true" ]; then
@@ -230,6 +239,14 @@ jobs:
             --kernel ".work/${{ inputs.profile }}/kernel" \
             --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}" \
             $btf_arg
+          if [ "$REQUIRE_ANALYSIS_ARTIFACTS" = "true" ]; then
+            rmg-port validate-analysis \
+              --payloads-repo ../payloads \
+              --profile "${{ inputs.profile }}" \
+              --vmlinux-nm ".work/${{ inputs.profile }}/vmlinux.nm" \
+              --btf-raw ".work/${{ inputs.profile }}/vmlinux-btf.raw" \
+              --kernel-release "${{ inputs.kernel_release }}"
+          fi
           rmg-port checklist --payloads-repo ../payloads --profile "${{ inputs.profile }}"
 
       - name: Open pull request

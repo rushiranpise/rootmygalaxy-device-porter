@@ -107,6 +107,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--allow-profile-build-mismatch", action="store_true")
     p.set_defaults(func=cmd_validate_port)
 
+    p = sub.add_parser("validate-analysis", help="Validate deeper recovered-kernel and KernelSU audit artifacts")
+    p.add_argument("--payloads-repo", required=True, type=Path)
+    p.add_argument("--profile", required=True)
+    p.add_argument("--vmlinux-nm", required=True, type=Path)
+    p.add_argument("--btf-raw", type=Path)
+    p.add_argument("--worker-objdump", type=Path)
+    p.add_argument("--modinfo", type=Path)
+    p.add_argument("--kernel-release")
+    p.add_argument("--check-symbol-log", type=Path)
+    p.add_argument("--module-audit-log", type=Path)
+    p.set_defaults(func=cmd_validate_analysis)
+
     p = sub.add_parser("checklist", help="Print the remaining PR checklist")
     p.add_argument("--payloads-repo", required=True, type=Path)
     p.add_argument("--profile", required=True)
@@ -523,6 +535,124 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
         return 1
     print("offline port gates OK")
     return 0
+
+
+def cmd_validate_analysis(args: argparse.Namespace) -> int:
+    target_h = args.payloads_repo / "src" / "targets" / args.profile / "target.h"
+    errors: list[str] = []
+    if not target_h.exists():
+        errors.append(f"missing target header: {target_h}")
+        target_text = ""
+    else:
+        target_text = target_h.read_text(encoding="utf-8", errors="replace")
+
+    if not args.vmlinux_nm.exists():
+        errors.append(f"missing vmlinux nm dump: {args.vmlinux_nm}")
+        nm = {}
+    else:
+        nm = parse_nm(args.vmlinux_nm)
+        if len(nm) < 1000:
+            errors.append(f"vmlinux nm dump has too few symbols: {len(nm)}")
+
+    base = parse_macro_int(target_text, "KIMAGE_TEXT_BASE")
+    if base is None:
+        errors.append("target.h missing numeric KIMAGE_TEXT_BASE")
+
+    symbol_checks = {
+        "CALL_USERMODEHELPER_EXEC_WORK_OFF": "call_usermodehelper_exec_work",
+        "NOOP_LLSEEK_OFF": "noop_llseek",
+        "COPY_SPLICE_READ_OFF": "generic_file_splice_read",
+        "CONFIGFS_READ_ITER_OFF": "configfs_read_iter",
+        "CONFIGFS_BIN_WRITE_ITER_OFF": "configfs_bin_write_iter",
+        "ASHMEM_IOCTL_OFF": "ashmem_ioctl",
+        "ASHMEM_COMPAT_IOCTL_OFF": "compat_ashmem_ioctl",
+        "ASHMEM_MMAP_OFF": "ashmem_mmap",
+        "ASHMEM_OPEN_OFF": "ashmem_open",
+        "ASHMEM_RELEASE_OFF": "ashmem_release",
+        "ASHMEM_SHOW_FDINFO_OFF": "ashmem_show_fdinfo",
+        "ANON_PIPE_BUF_OPS_OFF": "anon_pipe_buf_ops",
+        "ASHMEM_FOPS_OFF": "ashmem_fops",
+        "KMALLOC_CACHES_OFF": "kmalloc_caches",
+        "SYSTEM_UNBOUND_WQ_OFF": "system_unbound_wq",
+        "INIT_TASK_OFF": "init_task",
+        "ROOT_TASK_GROUP_OFF": "root_task_group",
+    }
+    if base is not None and nm:
+        for macro, symbol in symbol_checks.items():
+            expected = parse_macro_int(target_text, macro)
+            actual_addr = nm.get(symbol)
+            if expected is None:
+                errors.append(f"target.h missing numeric {macro}")
+            elif actual_addr is None:
+                errors.append(f"vmlinux nm missing symbol {symbol} for {macro}")
+            elif actual_addr - base != expected:
+                errors.append(
+                    f"{macro} mismatch: target.h=0x{expected:x} "
+                    f"nm({symbol})-base=0x{actual_addr - base:x}"
+                )
+
+    if args.btf_raw:
+        if not args.btf_raw.exists():
+            errors.append(f"missing BTF raw dump: {args.btf_raw}")
+        else:
+            btf_text = args.btf_raw.read_text(encoding="utf-8", errors="replace")
+            for needle in ("STRUCT 'file_operations'", "STRUCT 'task_struct'", "STRUCT 'page'"):
+                if needle not in btf_text:
+                    errors.append(f"BTF raw dump missing {needle}")
+
+    if args.worker_objdump:
+        if not args.worker_objdump.exists():
+            errors.append(f"missing worker_thread objdump: {args.worker_objdump}")
+        else:
+            worker_text = args.worker_objdump.read_text(encoding="utf-8", errors="replace")
+            if "worker_thread" not in worker_text or "schedule" not in worker_text:
+                errors.append("worker_thread objdump must include worker_thread and schedule call evidence")
+
+    if args.modinfo:
+        if not args.modinfo.exists():
+            errors.append(f"missing modinfo output: {args.modinfo}")
+        else:
+            modinfo_text = args.modinfo.read_text(encoding="utf-8", errors="replace")
+            if "vermagic:" not in modinfo_text:
+                errors.append("modinfo output missing vermagic")
+            if args.kernel_release and args.kernel_release not in modinfo_text:
+                errors.append(f"modinfo vermagic does not contain kernel release {args.kernel_release}")
+
+    for label, path in (
+        ("check_symbol", args.check_symbol_log),
+        ("module audit", args.module_audit_log),
+    ):
+        if path:
+            if not path.exists():
+                errors.append(f"missing {label} log: {path}")
+            else:
+                text = path.read_text(encoding="utf-8", errors="replace").lower()
+                bad_words = ("missing", "mismatch", "error", "failed")
+                if any(word in text for word in bad_words) and "zero missing" not in text:
+                    errors.append(f"{label} log contains failure words")
+
+    if errors:
+        for error in errors:
+            print(f"[FAIL] {error}", file=sys.stderr)
+        return 1
+    print("analysis gates OK")
+    return 0
+
+
+def parse_nm(path: Path) -> dict[str, int]:
+    symbols: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and re.fullmatch(r"[0-9a-fA-F]+", parts[0]):
+            symbols[parts[-1]] = int(parts[0], 16)
+    return symbols
+
+
+def parse_macro_int(text: str, macro: str) -> int | None:
+    match = re.search(rf"^\s*#define\s+{re.escape(macro)}\s+\(?\s*(0x[0-9a-fA-F]+|\d+)", text, re.MULTILINE)
+    if not match:
+        return None
+    return int(match.group(1), 0)
 
 
 def local_path_from_raw_url(repo: Path, url: str) -> Path | None:

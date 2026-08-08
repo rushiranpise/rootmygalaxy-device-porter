@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source-target", required=True)
     p.add_argument("--p0-header", type=Path)
     p.add_argument("--replace-existing", action="store_true")
+    p.add_argument("--write-readme", action="store_true")
     p.set_defaults(func=cmd_scaffold_target)
 
     p = sub.add_parser("write-port-doc", help="Write a generated docs/<model>-<build>.md stub")
@@ -83,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--kernel-version", required=True, action="append")
     p.add_argument("--exploit-path", required=True, type=Path)
     p.add_argument("--kernelsu-path", required=True, type=Path)
+    p.add_argument("--preserve-existing-metadata", action="store_true")
     p.add_argument("--requires-fresh-p0-session", action="store_true")
     p.set_defaults(func=cmd_add_feed_entry)
 
@@ -273,7 +275,7 @@ def cmd_scaffold_target(args: argparse.Namespace) -> int:
     if args.p0_header:
         shutil.copyfile(args.p0_header, dst / "p0_fingerprint.h")
     readme = dst / "README.md"
-    if not readme.exists():
+    if args.write_readme and not readme.exists():
         readme.write_text(
             f"# {args.profile}\n\n"
             "Porting notes must record firmware identity, hashes, offset sources, "
@@ -319,13 +321,21 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     payload_id = args.payload_id or args.profile
     feed_path = repo / "support" / "targets-v3.json"
     data = json.loads(feed_path.read_text(encoding="utf-8"))
+    existing_entries = [p for p in data.get("payloads", []) if p.get("payloadId") == payload_id]
+    existing = existing_entries[0] if existing_entries else {}
     exploit_rel = args.exploit_path.resolve().relative_to(repo.resolve()).as_posix()
     kernelsu_rel = args.kernelsu_path.resolve().relative_to(repo.resolve()).as_posix()
     entry = {
         "payloadId": payload_id,
-        "displayName": args.display_name,
-        "models": sorted(set(args.model)),
-        "kernelVersions": sorted(set(args.kernel_version)),
+        "displayName": existing.get("displayName", args.display_name)
+        if args.preserve_existing_metadata
+        else args.display_name,
+        "models": existing.get("models", sorted(set(args.model)))
+        if args.preserve_existing_metadata
+        else sorted(set(args.model)),
+        "kernelVersions": existing.get("kernelVersions", sorted(set(args.kernel_version)))
+        if args.preserve_existing_metadata
+        else sorted(set(args.kernel_version)),
         "exploit": {
             "url": f"https://raw.githubusercontent.com/BuSung-dev/Root-My-Galaxy-Payloads/main/{exploit_rel}",
             "size": args.exploit_path.stat().st_size,
@@ -335,7 +345,9 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
             "size": args.kernelsu_path.stat().st_size,
         },
     }
-    if args.requires_fresh_p0_session:
+    if args.preserve_existing_metadata and "requiresFreshP0Session" in existing:
+        entry["requiresFreshP0Session"] = existing["requiresFreshP0Session"]
+    elif args.requires_fresh_p0_session:
         entry["requiresFreshP0Session"] = True
     payloads = [p for p in data.get("payloads", []) if p.get("payloadId") != payload_id]
     payloads.append(entry)

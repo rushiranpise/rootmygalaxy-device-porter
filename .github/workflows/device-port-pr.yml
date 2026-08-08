@@ -32,6 +32,14 @@ on:
         description: allow replacing an existing target in the CI checkout
         required: true
         default: "false"
+      create_port_doc:
+        description: create a generated docs/<model>-<build>.md provenance stub
+        required: true
+        default: "false"
+      preserve_existing_feed_metadata:
+        description: preserve models/displayName/kernelVersions for an existing payloadId
+        required: true
+        default: "true"
       probe_offset:
         description: P0 probe offset for p0_fingerprint.h
         required: true
@@ -98,6 +106,7 @@ jobs:
         run: |
           mkdir -p ".work/${{ inputs.profile }}"
           if [ -n "${{ inputs.firmware_url }}" ]; then
+            version="${{ inputs.version }}"
             curl -L --fail --retry 5 \
               -o ".work/${{ inputs.profile }}/firmware.zip" \
               "${{ inputs.firmware_url }}"
@@ -113,13 +122,13 @@ jobs:
               version="$(python3 -c 'from pathlib import Path; import re, sys; text = Path(".work/${{ inputs.profile }}/samloader-check-update.txt").read_text(); match = re.search(r"Latest Stable Version:\s*([A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+)", text); sys.exit("samloader check-update did not print a latest stable four-part version") if not match else print(match.group(1))')"
               echo "Resolved latest firmware version: $version"
             fi
-            echo "$version" > ".work/${{ inputs.profile }}/resolved-version.txt"
             samloader download \
               --model "${{ inputs.model }}" \
               --region "${{ inputs.region }}" \
               --version "$version" \
               --out-file ".work/${{ inputs.profile }}/firmware.zip"
           fi
+          echo "$version" > ".work/${{ inputs.profile }}/resolved-version.txt"
 
       - name: Extract kernel and generated headers
         working-directory: porter
@@ -145,6 +154,7 @@ jobs:
         working-directory: porter
         env:
           REPLACE_EXISTING_TARGET: ${{ inputs.replace_existing_target }}
+          CREATE_PORT_DOC: ${{ inputs.create_port_doc }}
         run: |
           replace_arg=""
           if [ "$REPLACE_EXISTING_TARGET" = "true" ]; then
@@ -156,14 +166,16 @@ jobs:
             --source-target "${{ inputs.source_target }}" \
             --p0-header ".work/${{ inputs.profile }}/p0_fingerprint.h" \
             $replace_arg
-          rmg-port write-port-doc \
-            --payloads-repo ../payloads \
-            --profile "${{ inputs.profile }}" \
-            --model "${{ inputs.model }}" \
-            --region "${{ inputs.region }}" \
-            --version "$(cat ".work/${{ inputs.profile }}/resolved-version.txt")" \
-            --kernel ".work/${{ inputs.profile }}/kernel" \
-            --kernel-release "${{ inputs.kernel_release }}"
+          if [ "$CREATE_PORT_DOC" = "true" ]; then
+            rmg-port write-port-doc \
+              --payloads-repo ../payloads \
+              --profile "${{ inputs.profile }}" \
+              --model "${{ inputs.model }}" \
+              --region "${{ inputs.region }}" \
+              --version "$(cat ".work/${{ inputs.profile }}/resolved-version.txt")" \
+              --kernel ".work/${{ inputs.profile }}/kernel" \
+              --kernel-release "${{ inputs.kernel_release }}"
+          fi
 
       - name: Build release payload
         working-directory: payloads
@@ -176,7 +188,13 @@ jobs:
 
       - name: Update support feed
         working-directory: porter
+        env:
+          PRESERVE_EXISTING_FEED_METADATA: ${{ inputs.preserve_existing_feed_metadata }}
         run: |
+          preserve_arg=""
+          if [ "$PRESERVE_EXISTING_FEED_METADATA" = "true" ]; then
+            preserve_arg="--preserve-existing-metadata"
+          fi
           rmg-port add-feed-entry \
             --payloads-repo ../payloads \
             --profile "${{ inputs.profile }}" \
@@ -185,7 +203,8 @@ jobs:
             --model "${{ inputs.model }}" \
             --kernel-version "${{ inputs.kernel_version }}" \
             --exploit-path "../payloads/artifacts/${{ inputs.profile }}/cve-2026-43499-app.so" \
-            --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}"
+            --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}" \
+            $preserve_arg
           rmg-port validate-feed --payloads-repo ../payloads
           rmg-port validate-port \
             --payloads-repo ../payloads \
@@ -211,6 +230,10 @@ jobs:
                   "artifacts/${{ inputs.profile }}" \
                   support/targets-v3.json \
                   docs
+          if git diff --cached --quiet; then
+            echo "No payload changes after validation; skipping PR creation."
+            exit 0
+          fi
           git commit -m "Add ${{ inputs.profile }} payload profile"
           git remote set-url origin "https://x-access-token:${PAYLOADS_PR_TOKEN}@github.com/${{ inputs.payloads_repo }}.git"
           git push --force-with-lease origin "$branch"

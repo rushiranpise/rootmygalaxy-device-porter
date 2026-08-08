@@ -16,6 +16,10 @@ By default it targets `rushiranpise/Root-My-Galaxy-Payloads`.
 - update `support/targets-v3.json`;
 - create a PR branch and open a PR.
 
+For existing payload IDs, the workflow preserves existing feed metadata by
+default so shared profiles such as the S25 series are not collapsed into a
+single-model entry.
+
 ## Required Secret
 
 Create a repository secret in the porter repo:

@@ -28,6 +28,8 @@ region: KOO
 version: S938NKSUACZF1/S938NOKRACZF1/S938NKSUACZE9/S938NKSUACZF1
 source_target: pa3q-S938NKSUACZF1
 replace_existing_target: true
+create_port_doc: false
+preserve_existing_feed_metadata: true
 probe_offset: 0x1f0000
 kernel_version: 6.6.98
 kernel_release: 6.6.98

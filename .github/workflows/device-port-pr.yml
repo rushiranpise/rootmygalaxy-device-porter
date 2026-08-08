@@ -106,17 +106,7 @@ jobs:
                 --region "${{ inputs.region }}" \
                 --all \
                 --verbose | tee ".work/${{ inputs.profile }}/samloader-check-update.txt"
-              version="$(python3 - <<'PY'
-from pathlib import Path
-import re
-
-text = Path(".work/${{ inputs.profile }}/samloader-check-update.txt").read_text()
-versions = re.findall(r"[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+", text)
-if not versions:
-    raise SystemExit("samloader check-update did not print a four-part version")
-print(versions[-1])
-PY
-)"
+              version="$(python3 -c 'from pathlib import Path; import re, sys; text = Path(".work/${{ inputs.profile }}/samloader-check-update.txt").read_text(); versions = re.findall(r"[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+", text); sys.exit("samloader check-update did not print a four-part version") if not versions else print(versions[-1])')"
               echo "Resolved latest firmware version: $version"
             fi
             samloader download \

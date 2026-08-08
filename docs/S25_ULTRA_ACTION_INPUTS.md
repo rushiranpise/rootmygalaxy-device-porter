@@ -42,7 +42,7 @@ Notes:
   profile name or delete the generated branch after testing.
 - Use `firmware_url` when you already have a direct firmware ZIP URL. Leave it
   empty to make the action call `samloader`. Use `version: latest` to make the
-  action resolve the four-part version with `samloader check-update`.
+  action resolve the `Latest Stable Version` with `samloader check-update`.
 - The current support-feed entry is shared across S25/S25+/S25 Edge/S25 Ultra
   regional models. A real support PR should preserve that shared payload shape
   unless the new firmware truly needs a separate artifact.

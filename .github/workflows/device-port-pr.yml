@@ -70,6 +70,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.payloads_repo }}
+          token: ${{ secrets.PAYLOADS_PR_TOKEN || github.token }}
           path: payloads
 
       - name: Install system tools

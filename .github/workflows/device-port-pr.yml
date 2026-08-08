@@ -72,36 +72,10 @@ on:
       kernelsu_artifact:
         description: existing KernelSU path in payload repo, for example kernelsu/ksud-A366WVLS3AYG1-kdp
         required: true
-      kernelsu_ko_artifact:
-        description: optional standalone KernelSU .ko path in payload repo
+      kernelsu_options_json:
+        description: optional JSON for KO/build/audit paths and KernelSU source build settings
         required: false
-      check_symbol_log:
-        description: optional KernelSU check_symbol log path in payload repo
-        required: false
-      module_audit_log:
-        description: optional KernelSU module audit log path in payload repo
-        required: false
-      kernelsu_source_repo:
-        description: optional KernelSU source repository to checkout and build
-        required: false
-      kernelsu_source_ref:
-        description: optional KernelSU source ref
-        required: false
-        default: v3.2.5
-      kernelsu_patch_path:
-        description: optional patch path in payload repo to apply to KernelSU source
-        required: false
-      kernelsu_build_command:
-        description: optional shell command that builds a KernelSU .ko in the source checkout
-        required: false
-      kernelsu_built_ko_path:
-        description: optional built .ko path relative to KernelSU source checkout
-        required: false
-        default: kernel/kernelsu.ko
-      kernelsu_manual_relocation:
-        description: pass --manual-relocation to the KernelSU module audit
-        required: true
-        default: "true"
+        default: "{}"
       dry_run:
         description: build and validate, but do not open a PR
         required: true
@@ -246,16 +220,25 @@ jobs:
              "artifacts/${{ inputs.profile }}/cve-2026-43499-app.so"
 
       - name: Build and audit KernelSU module
-        if: ${{ inputs.kernelsu_source_repo != '' && inputs.kernelsu_build_command != '' }}
         working-directory: porter
         env:
-          KERNELSU_SOURCE_REPO: ${{ inputs.kernelsu_source_repo }}
-          KERNELSU_SOURCE_REF: ${{ inputs.kernelsu_source_ref }}
-          KERNELSU_PATCH_PATH: ${{ inputs.kernelsu_patch_path }}
-          KERNELSU_BUILD_COMMAND: ${{ inputs.kernelsu_build_command }}
-          KERNELSU_BUILT_KO_PATH: ${{ inputs.kernelsu_built_ko_path }}
-          KERNELSU_MANUAL_RELOCATION: ${{ inputs.kernelsu_manual_relocation }}
+          KERNELSU_OPTIONS_JSON: ${{ inputs.kernelsu_options_json }}
         run: |
+          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_OPTIONS_JSON") or "{}"); keys=("source_repo","source_ref","patch_path","build_command","built_ko_path","manual_relocation"); print("\n".join(f"KERNELSU_{k.upper()}={shlex.quote(str(opts.get(k, \"\")))}" for k in keys))' > ".work/kernelsu-options.env"
+          . ".work/kernelsu-options.env"
+          if [ -z "$KERNELSU_SOURCE_REPO" ] || [ -z "$KERNELSU_BUILD_COMMAND" ]; then
+            echo "KernelSU source build not requested."
+            exit 0
+          fi
+          if [ -z "$KERNELSU_SOURCE_REF" ]; then
+            KERNELSU_SOURCE_REF="v3.2.5"
+          fi
+          if [ -z "$KERNELSU_BUILT_KO_PATH" ]; then
+            KERNELSU_BUILT_KO_PATH="kernel/kernelsu.ko"
+          fi
+          if [ -z "$KERNELSU_MANUAL_RELOCATION" ]; then
+            KERNELSU_MANUAL_RELOCATION="true"
+          fi
           git clone --depth 1 --branch "$KERNELSU_SOURCE_REF" "$KERNELSU_SOURCE_REPO" ".work/kernelsu-src"
           if [ -n "$KERNELSU_PATCH_PATH" ]; then
             git -C ".work/kernelsu-src" apply "$(pwd)/../payloads/$KERNELSU_PATCH_PATH"
@@ -290,7 +273,10 @@ jobs:
           PRESERVE_EXISTING_FEED_METADATA: ${{ inputs.preserve_existing_feed_metadata }}
           REQUIRE_BTF: ${{ inputs.require_btf }}
           REQUIRE_ANALYSIS_ARTIFACTS: ${{ inputs.require_analysis_artifacts }}
+          KERNELSU_OPTIONS_JSON: ${{ inputs.kernelsu_options_json }}
         run: |
+          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_OPTIONS_JSON") or "{}"); keys=("ko_artifact","check_symbol_log","module_audit_log"); print("\n".join(f"KERNELSU_{k.upper()}={shlex.quote(str(opts.get(k, \"\")))}" for k in keys))' > ".work/kernelsu-options.env"
+          . ".work/kernelsu-options.env"
           preserve_arg=""
           if [ "$PRESERVE_EXISTING_FEED_METADATA" = "true" ]; then
             preserve_arg="--preserve-existing-metadata"
@@ -300,22 +286,22 @@ jobs:
             btf_arg="--btf .work/${{ inputs.profile }}/vmlinux.btf"
           fi
           ko_arg=""
-          if [ -n "${{ inputs.kernelsu_ko_artifact }}" ]; then
-            ko_arg="--kernelsu-ko-path ../payloads/${{ inputs.kernelsu_ko_artifact }}"
-            modinfo "../payloads/${{ inputs.kernelsu_ko_artifact }}" \
+          if [ -n "$KERNELSU_KO_ARTIFACT" ]; then
+            ko_arg="--kernelsu-ko-path ../payloads/$KERNELSU_KO_ARTIFACT"
+            modinfo "../payloads/$KERNELSU_KO_ARTIFACT" \
               > ".work/${{ inputs.profile }}/kernelsu.modinfo"
           elif [ -f ".work/${{ inputs.profile }}/kernelsu.modinfo" ]; then
             ko_arg=""
           fi
           check_symbol_arg=""
-          if [ -n "${{ inputs.check_symbol_log }}" ]; then
-            check_symbol_arg="--check-symbol-log ../payloads/${{ inputs.check_symbol_log }}"
+          if [ -n "$KERNELSU_CHECK_SYMBOL_LOG" ]; then
+            check_symbol_arg="--check-symbol-log ../payloads/$KERNELSU_CHECK_SYMBOL_LOG"
           elif [ -f ".work/${{ inputs.profile }}/check_symbol.log" ]; then
             check_symbol_arg="--check-symbol-log .work/${{ inputs.profile }}/check_symbol.log"
           fi
           module_audit_arg=""
-          if [ -n "${{ inputs.module_audit_log }}" ]; then
-            module_audit_arg="--module-audit-log ../payloads/${{ inputs.module_audit_log }}"
+          if [ -n "$KERNELSU_MODULE_AUDIT_LOG" ]; then
+            module_audit_arg="--module-audit-log ../payloads/$KERNELSU_MODULE_AUDIT_LOG"
           elif [ -f ".work/${{ inputs.profile }}/module_audit.log" ]; then
             module_audit_arg="--module-audit-log .work/${{ inputs.profile }}/module_audit.log"
           fi

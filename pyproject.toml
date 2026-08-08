@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rootmygalaxy-device-porter"
+version = "0.1.0"
+description = "Automation helper for Root My Galaxy payload device ports"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+lz4 = ["lz4>=4.3"]
+
+[project.scripts]
+rmg-port = "rmg_porter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

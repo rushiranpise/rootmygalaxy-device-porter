@@ -1,0 +1,190 @@
+name: Device port PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      payloads_repo:
+        description: owner/repo for Root-My-Galaxy-Payloads
+        required: true
+        default: rushiranpise/Root-My-Galaxy-Payloads
+      profile:
+        description: payload profile, for example a36xq-A366WVLS3AYG1
+        required: true
+      model:
+        description: exact Build.MODEL, for example SM-A366W
+        required: true
+      region:
+        description: Samsung CSC/region
+        required: true
+      version:
+        description: four-part Samsung firmware version from samloader
+        required: true
+      firmware_url:
+        description: optional direct firmware zip URL; if empty, samloader is used
+        required: false
+      source_target:
+        description: existing target to copy as a scaffold only
+        required: true
+      replace_existing_target:
+        description: allow replacing an existing target in the CI checkout
+        required: true
+        default: "false"
+      probe_offset:
+        description: P0 probe offset for p0_fingerprint.h
+        required: true
+        default: "0x1f0000"
+      kernel_version:
+        description: leading uname -r version used by targets-v3.json, for example 6.6.46
+        required: true
+      kernel_release:
+        description: full kernel release/vermagic note
+        required: false
+      ndk_version:
+        description: Android NDK version to install with sdkmanager
+        required: true
+        default: "29.0.14206865"
+      display_name:
+        description: support feed display name
+        required: true
+      kernelsu_artifact:
+        description: existing KernelSU path in payload repo, for example kernelsu/ksud-A366WVLS3AYG1-kdp
+        required: true
+      dry_run:
+        description: build and validate, but do not open a PR
+        required: true
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  port:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout porter
+        uses: actions/checkout@v4
+        with:
+          path: porter
+
+      - name: Checkout payloads
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.payloads_repo }}
+          token: ${{ secrets.PAYLOADS_PR_TOKEN }}
+          path: payloads
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip tar make clang llvm lz4 python3-pip
+
+      - name: Install porter
+        run: |
+          python3 -m pip install ./porter[lz4]
+
+      - name: Install Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;${{ inputs.ndk_version }}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ inputs.ndk_version }}" >> "$GITHUB_ENV"
+
+      - name: Download firmware
+        working-directory: porter
+        run: |
+          mkdir -p ".work/${{ inputs.profile }}"
+          if [ -n "${{ inputs.firmware_url }}" ]; then
+            curl -L --fail --retry 5 \
+              -o ".work/${{ inputs.profile }}/firmware.zip" \
+              "${{ inputs.firmware_url }}"
+          else
+            python3 -m pip install samloader
+            samloader download \
+              --model "${{ inputs.model }}" \
+              --region "${{ inputs.region }}" \
+              --version "${{ inputs.version }}" \
+              --out-file ".work/${{ inputs.profile }}/firmware.zip"
+          fi
+
+      - name: Extract kernel and generated headers
+        working-directory: porter
+        run: |
+          rmg-port init \
+            --profile "${{ inputs.profile }}" \
+            --model "${{ inputs.model }}" \
+            --region "${{ inputs.region }}" \
+            --version "${{ inputs.version }}" \
+            --workdir ".work/${{ inputs.profile }}"
+          rmg-port extract-kernel \
+            --firmware-zip ".work/${{ inputs.profile }}/firmware.zip" \
+            --workdir ".work/${{ inputs.profile }}"
+          rmg-port extract-btf \
+            --kernel ".work/${{ inputs.profile }}/kernel" \
+            --out ".work/${{ inputs.profile }}/vmlinux.btf" || true
+          rmg-port gen-p0 \
+            --kernel ".work/${{ inputs.profile }}/kernel" \
+            --probe-offset "${{ inputs.probe_offset }}" \
+            --out ".work/${{ inputs.profile }}/p0_fingerprint.h"
+
+      - name: Scaffold target in payload repo
+        working-directory: porter
+        run: |
+          rmg-port scaffold-target \
+            --payloads-repo ../payloads \
+            --profile "${{ inputs.profile }}" \
+            --source-target "${{ inputs.source_target }}" \
+            --p0-header ".work/${{ inputs.profile }}/p0_fingerprint.h" \
+            ${{ inputs.replace_existing_target == 'true' && '--replace-existing' || '' }}
+          rmg-port write-port-doc \
+            --payloads-repo ../payloads \
+            --profile "${{ inputs.profile }}" \
+            --model "${{ inputs.model }}" \
+            --region "${{ inputs.region }}" \
+            --version "${{ inputs.version }}" \
+            --kernel ".work/${{ inputs.profile }}/kernel" \
+            --kernel-release "${{ inputs.kernel_release }}"
+
+      - name: Build release payload
+        working-directory: payloads
+        run: |
+          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+          make TARGET="${{ inputs.profile }}" release
+          mkdir -p "artifacts/${{ inputs.profile }}"
+          cp "build/${{ inputs.profile }}/cve-2026-43499-app.release.so" \
+             "artifacts/${{ inputs.profile }}/cve-2026-43499-app.so"
+
+      - name: Update support feed
+        working-directory: porter
+        run: |
+          rmg-port add-feed-entry \
+            --payloads-repo ../payloads \
+            --profile "${{ inputs.profile }}" \
+            --display-name "${{ inputs.display_name }}" \
+            --model "${{ inputs.model }}" \
+            --kernel-version "${{ inputs.kernel_version }}" \
+            --exploit-path "../payloads/artifacts/${{ inputs.profile }}/cve-2026-43499-app.so" \
+            --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}"
+          rmg-port validate-feed --payloads-repo ../payloads
+          rmg-port checklist --payloads-repo ../payloads --profile "${{ inputs.profile }}"
+
+      - name: Open pull request
+        if: ${{ inputs.dry_run != 'true' }}
+        working-directory: payloads
+        env:
+          GH_TOKEN: ${{ secrets.PAYLOADS_PR_TOKEN }}
+        run: |
+          branch="device-port/${{ inputs.profile }}"
+          git config user.name "rootmygalaxy-device-porter"
+          git config user.email "rootmygalaxy-device-porter@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add "src/targets/${{ inputs.profile }}" \
+                  "artifacts/${{ inputs.profile }}" \
+                  support/targets-v3.json \
+                  docs
+          git commit -m "Add ${{ inputs.profile }} payload profile"
+          git push --force-with-lease origin "$branch"
+          gh pr create \
+            --repo "${{ inputs.payloads_repo }}" \
+            --base main \
+            --head "$branch" \
+            --title "Add ${{ inputs.profile }} payload profile" \
+            --body "Automated mechanical port PR. Manual review still required for target offsets, KernelSU audit, and hardware validation before merge."

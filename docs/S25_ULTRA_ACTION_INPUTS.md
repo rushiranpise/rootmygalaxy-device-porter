@@ -33,7 +33,8 @@ preserve_existing_feed_metadata: true
 probe_offset: 0x1f0000
 kernel_version: 6.6.98
 kernel_release: 6.6.98
-display_name: Galaxy S25 Ultra | Kernel 6.6.98
+release_size_max: 104128
+display_name: Galaxy S25 series | Kernel 6.6.98
 kernelsu_artifact: kernelsu/ksud-s25u-kdp
 dry_run: true
 ```

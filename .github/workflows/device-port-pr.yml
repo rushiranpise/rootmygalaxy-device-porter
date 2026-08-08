@@ -54,6 +54,10 @@ on:
       kernel_release:
         description: full kernel release/vermagic note
         required: false
+      release_size_max:
+        description: maximum release payload size in bytes
+        required: true
+        default: "200000"
       ndk_version:
         description: Android NDK version to install with sdkmanager
         required: true
@@ -222,6 +226,7 @@ jobs:
             --version "$(cat ".work/${{ inputs.profile }}/resolved-version.txt")" \
             --kernel-version "${{ inputs.kernel_version }}" \
             --kernel-release "${{ inputs.kernel_release }}" \
+            --release-size-max "${{ inputs.release_size_max }}" \
             --kernel ".work/${{ inputs.profile }}/kernel" \
             --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}" \
             $btf_arg

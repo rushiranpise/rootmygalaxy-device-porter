@@ -1,7 +1,8 @@
 # Root My Galaxy Device Porter
 
-Automation helper for adding a new device profile to
-`Root-My-Galaxy-Payloads`.
+Universal automation helper for adding a new device profile to
+`Root-My-Galaxy-Payloads`. The S25 Ultra values in this repo are examples used
+to test the workflow, not assumptions baked into the porter.
 
 This repo does not try to invent kernel offsets. It automates the repeatable
 parts around a port:

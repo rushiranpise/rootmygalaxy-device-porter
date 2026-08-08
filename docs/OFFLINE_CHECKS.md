@@ -8,7 +8,7 @@ Always enforced:
 - `target.h` `BUILD_FINGERPRINT` contains the AP build;
 - required target macros and accepted legacy aliases exist;
 - `target.h` references `targets/<profile>/p0_fingerprint.h`;
-- release payload exists and is within the fixed release-size limit;
+- release payload exists and is within the configured release-size limit;
 - P0 fingerprint contains all 32 slides from `0x000000` through `0x1f0000`;
 - each P0 row contains 8 qwords;
 - support feed has exactly one expected `payloadId`;

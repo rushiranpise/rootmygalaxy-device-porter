@@ -148,13 +148,19 @@ PY
 
       - name: Scaffold target in payload repo
         working-directory: porter
+        env:
+          REPLACE_EXISTING_TARGET: ${{ inputs.replace_existing_target }}
         run: |
+          replace_arg=""
+          if [ "$REPLACE_EXISTING_TARGET" = "true" ]; then
+            replace_arg="--replace-existing"
+          fi
           rmg-port scaffold-target \
             --payloads-repo ../payloads \
             --profile "${{ inputs.profile }}" \
             --source-target "${{ inputs.source_target }}" \
             --p0-header ".work/${{ inputs.profile }}/p0_fingerprint.h" \
-            ${{ inputs.replace_existing_target == 'true' && '--replace-existing' || '' }}
+            $replace_arg
           rmg-port write-port-doc \
             --payloads-repo ../payloads \
             --profile "${{ inputs.profile }}" \

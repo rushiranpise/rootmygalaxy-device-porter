@@ -17,7 +17,7 @@ on:
         description: Samsung CSC/region
         required: true
       version:
-        description: four-part Samsung firmware version from samloader
+        description: four-part Samsung firmware version from samloader, or latest
         required: true
       firmware_url:
         description: optional direct firmware zip URL; if empty, samloader is used
@@ -89,6 +89,8 @@ jobs:
 
       - name: Download firmware
         working-directory: porter
+        env:
+          RUST_BACKTRACE: "1"
         run: |
           mkdir -p ".work/${{ inputs.profile }}"
           if [ -n "${{ inputs.firmware_url }}" ]; then
@@ -97,10 +99,30 @@ jobs:
               "${{ inputs.firmware_url }}"
           else
             cargo install samloader --locked
+            version="${{ inputs.version }}"
+            if [ "$version" = "latest" ]; then
+              samloader check-update \
+                --model "${{ inputs.model }}" \
+                --region "${{ inputs.region }}" \
+                --all \
+                --verbose | tee ".work/${{ inputs.profile }}/samloader-check-update.txt"
+              version="$(python3 - <<'PY'
+from pathlib import Path
+import re
+
+text = Path(".work/${{ inputs.profile }}/samloader-check-update.txt").read_text()
+versions = re.findall(r"[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+", text)
+if not versions:
+    raise SystemExit("samloader check-update did not print a four-part version")
+print(versions[-1])
+PY
+)"
+              echo "Resolved latest firmware version: $version"
+            fi
             samloader download \
               --model "${{ inputs.model }}" \
               --region "${{ inputs.region }}" \
-              --version "${{ inputs.version }}" \
+              --version "$version" \
               --out-file ".work/${{ inputs.profile }}/firmware.zip"
           fi
 

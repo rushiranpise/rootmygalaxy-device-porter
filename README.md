@@ -94,6 +94,7 @@ See [`docs/GITHUB_ACTIONS_PIPELINE.md`](docs/GITHUB_ACTIONS_PIPELINE.md).
 The default PR target is `rushiranpise/Root-My-Galaxy-Payloads`; S25 Ultra
 baseline inputs are in
 [`docs/S25_ULTRA_ACTION_INPUTS.md`](docs/S25_ULTRA_ACTION_INPUTS.md).
+Offline gates are listed in [`docs/OFFLINE_CHECKS.md`](docs/OFFLINE_CHECKS.md).
 
 ## Current Boundary
 

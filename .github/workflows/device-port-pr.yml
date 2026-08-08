@@ -40,6 +40,10 @@ on:
         description: preserve models/displayName/kernelVersions for an existing payloadId
         required: true
         default: "true"
+      require_btf:
+        description: require raw BTF extraction; set false for documented no-BTF legacy ports
+        required: true
+        default: "true"
       probe_offset:
         description: P0 probe offset for p0_fingerprint.h
         required: true
@@ -190,10 +194,15 @@ jobs:
         working-directory: porter
         env:
           PRESERVE_EXISTING_FEED_METADATA: ${{ inputs.preserve_existing_feed_metadata }}
+          REQUIRE_BTF: ${{ inputs.require_btf }}
         run: |
           preserve_arg=""
           if [ "$PRESERVE_EXISTING_FEED_METADATA" = "true" ]; then
             preserve_arg="--preserve-existing-metadata"
+          fi
+          btf_arg=""
+          if [ "$REQUIRE_BTF" = "true" ]; then
+            btf_arg="--btf .work/${{ inputs.profile }}/vmlinux.btf"
           fi
           rmg-port add-feed-entry \
             --payloads-repo ../payloads \
@@ -211,7 +220,11 @@ jobs:
             --profile "${{ inputs.profile }}" \
             --payload-id "${{ inputs.payload_id || inputs.profile }}" \
             --version "$(cat ".work/${{ inputs.profile }}/resolved-version.txt")" \
-            --kernel-version "${{ inputs.kernel_version }}"
+            --kernel-version "${{ inputs.kernel_version }}" \
+            --kernel-release "${{ inputs.kernel_release }}" \
+            --kernel ".work/${{ inputs.profile }}/kernel" \
+            --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}" \
+            $btf_arg
           rmg-port checklist --payloads-repo ../payloads --profile "${{ inputs.profile }}"
 
       - name: Open pull request

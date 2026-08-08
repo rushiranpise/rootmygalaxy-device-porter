@@ -98,6 +98,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--payload-id")
     p.add_argument("--version", required=True)
     p.add_argument("--kernel-version", required=True)
+    p.add_argument("--kernel-release")
+    p.add_argument("--kernel", type=Path)
+    p.add_argument("--btf", type=Path)
+    p.add_argument("--release-size-max", type=int, default=104128)
+    p.add_argument("--kernelsu-path", type=Path)
+    p.add_argument("--kernelsu-ko-path", type=Path)
     p.add_argument("--allow-profile-build-mismatch", action="store_true")
     p.set_defaults(func=cmd_validate_port)
 
@@ -390,6 +396,40 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
     target_h = target_dir / "target.h"
     p0_h = target_dir / "p0_fingerprint.h"
     artifact = repo / "artifacts" / profile / "cve-2026-43499-app.so"
+    required_target_macros = [
+        "BUILD_FINGERPRINT",
+        "KIMAGE_TEXT_BASE",
+        "P0_PAGE_OFFSET",
+        "P0_PHYS_OFFSET",
+        "P0_KERNEL_PHYS_LOAD",
+        "SLIDE_TRACEFS_WORKER_CALLER_OFF",
+        "P0_FINGERPRINT_HEADER",
+        "ASHMEM_FOPS_OFF",
+        "ASHMEM_IOCTL_OFF",
+        "CONFIGFS_READ_ITER_OFF",
+        "COPY_SPLICE_READ_OFF",
+        "NOOP_LLSEEK_OFF",
+        "INIT_TASK_OFF",
+        "ROOT_TASK_GROUP_OFF",
+        "SELINUX_ENFORCING_OFF",
+        "KMALLOC_CACHES_OFF",
+        "ANON_PIPE_BUF_OPS_OFF",
+        "CALL_USERMODEHELPER_EXEC_WORK_OFF",
+        "SYSTEM_UNBOUND_WQ_OFF",
+        "SLIDE_NFULNL_LOGGER_NAME_OFF",
+        "SLIDE_NFULNL_LOGGER_OBJECT_OFF",
+        "SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF",
+        "SLIDE_SYSCTL_BOOTID_OFF",
+        "FAKE_WAITER_TASK_OFF",
+        "WORK_FUNC_OFF",
+    ]
+    required_macro_groups = [
+        ("file_operations size", ["SIZEOF_FILE_OPERATIONS", "FOPS_SHOW_FDINFO_OFF"]),
+        ("task usage offset", ["TASK_USAGE_OFF", "FAKE_TASK_USAGE_OFF"]),
+        ("task pi_lock offset", ["TASK_PI_LOCK_OFF", "FAKE_TASK_PI_LOCK_OFF"]),
+        ("task pi_waiters offset", ["TASK_PI_WAITERS_OFF", "FAKE_TASK_PI_WAITERS_OFF"]),
+        ("page size", ["SIZEOF_PAGE", "STRUCT_PAGE_SIZE"]),
+    ]
 
     errors: list[str] = []
     if not target_h.exists():
@@ -398,6 +438,11 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
         errors.append(f"missing P0 fingerprint: {p0_h}")
     if not artifact.exists():
         errors.append(f"missing release payload: {artifact}")
+    elif artifact.stat().st_size > args.release_size_max:
+        errors.append(
+            f"release payload is {artifact.stat().st_size} bytes, "
+            f"exceeds max {args.release_size_max}"
+        )
 
     if not args.allow_profile_build_mismatch and ap_build not in profile:
         errors.append(
@@ -406,6 +451,13 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
         )
 
     target_text = target_h.read_text(encoding="utf-8", errors="replace") if target_h.exists() else ""
+    for macro in required_target_macros:
+        if not re.search(rf"^\s*#define\s+{re.escape(macro)}\b", target_text, re.MULTILINE):
+            errors.append(f"target.h missing required macro {macro}")
+    for label, macros in required_macro_groups:
+        if not any(re.search(rf"^\s*#define\s+{re.escape(macro)}\b", target_text, re.MULTILINE) for macro in macros):
+            errors.append(f"target.h missing required macro group {label}: one of {', '.join(macros)}")
+
     fingerprint_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+"([^"]+)"', target_text)
     if fingerprint_match:
         fingerprint = fingerprint_match.group(1)
@@ -422,6 +474,40 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
     rows = re.findall(r"\{\s*0x[0-9a-fA-F]{6}ULL,\s*\{", p0_text)
     if p0_text and len(rows) != 32:
         errors.append(f"p0_fingerprint.h should contain 32 slide rows, found {len(rows)}")
+    elif p0_text:
+        slides = [int(match, 16) for match in re.findall(r"\{\s*0x([0-9a-fA-F]{6})ULL,\s*\{", p0_text)]
+        if sorted(slides) != [i * 0x10000 for i in range(32)]:
+            errors.append("p0_fingerprint.h must contain every slide 0x000000..0x1f0000 exactly once")
+        row_blocks = re.findall(
+            r"\{\s*0x[0-9a-fA-F]{6}ULL,\s*\{(?P<words>.*?)\}\s*\}",
+            p0_text,
+            re.DOTALL,
+        )
+        for index, block in enumerate(row_blocks, 1):
+            words = re.findall(r"0x[0-9a-fA-F]{16}ULL", block)
+            if len(words) != 8:
+                errors.append(f"p0_fingerprint row {index} has {len(words)} words, expected 8")
+
+    if args.kernel:
+        if not args.kernel.exists():
+            errors.append(f"kernel file not found: {args.kernel}")
+        else:
+            size = args.kernel.stat().st_size
+            if size < 16 * 1024 * 1024:
+                errors.append(f"raw kernel unexpectedly small: {size} bytes")
+
+    if args.btf:
+        if not args.btf.exists():
+            errors.append(f"BTF file not found: {args.btf}")
+        else:
+            btf = args.btf.read_bytes()
+            if len(btf) < 24 or btf[:4] != b"\x9f\xeb\x01\x00":
+                errors.append(f"BTF file does not start with validated little-endian raw BTF header: {args.btf}")
+
+    if args.kernelsu_path and not args.kernelsu_path.exists():
+        errors.append(f"KernelSU late-load artifact not found: {args.kernelsu_path}")
+    if args.kernelsu_ko_path and not args.kernelsu_ko_path.exists():
+        errors.append(f"KernelSU KO artifact not found: {args.kernelsu_ko_path}")
 
     feed_path = repo / "support" / "targets-v3.json"
     data = json.loads(feed_path.read_text(encoding="utf-8"))

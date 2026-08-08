@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -76,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("add-feed-entry", help="Add or replace one targets-v3.json payload entry")
     p.add_argument("--payloads-repo", required=True, type=Path)
     p.add_argument("--profile", required=True)
+    p.add_argument("--payload-id")
     p.add_argument("--display-name", required=True)
     p.add_argument("--model", required=True, action="append")
     p.add_argument("--kernel-version", required=True, action="append")
@@ -87,6 +89,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("validate-feed", help="Validate targets-v3 artifact sizes")
     p.add_argument("--payloads-repo", required=True, type=Path)
     p.set_defaults(func=cmd_validate_feed)
+
+    p = sub.add_parser("validate-port", help="Run offline gates before opening a payload PR")
+    p.add_argument("--payloads-repo", required=True, type=Path)
+    p.add_argument("--profile", required=True)
+    p.add_argument("--payload-id")
+    p.add_argument("--version", required=True)
+    p.add_argument("--kernel-version", required=True)
+    p.add_argument("--allow-profile-build-mismatch", action="store_true")
+    p.set_defaults(func=cmd_validate_port)
 
     p = sub.add_parser("checklist", help="Print the remaining PR checklist")
     p.add_argument("--payloads-repo", required=True, type=Path)
@@ -305,12 +316,13 @@ def cmd_write_port_doc(args: argparse.Namespace) -> int:
 
 def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     repo = args.payloads_repo
+    payload_id = args.payload_id or args.profile
     feed_path = repo / "support" / "targets-v3.json"
     data = json.loads(feed_path.read_text(encoding="utf-8"))
     exploit_rel = args.exploit_path.resolve().relative_to(repo.resolve()).as_posix()
     kernelsu_rel = args.kernelsu_path.resolve().relative_to(repo.resolve()).as_posix()
     entry = {
-        "payloadId": args.profile,
+        "payloadId": payload_id,
         "displayName": args.display_name,
         "models": sorted(set(args.model)),
         "kernelVersions": sorted(set(args.kernel_version)),
@@ -325,7 +337,7 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     }
     if args.requires_fresh_p0_session:
         entry["requiresFreshP0Session"] = True
-    payloads = [p for p in data.get("payloads", []) if p.get("payloadId") != args.profile]
+    payloads = [p for p in data.get("payloads", []) if p.get("payloadId") != payload_id]
     payloads.append(entry)
     data["payloads"] = payloads
     feed_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -354,6 +366,64 @@ def cmd_validate_feed(args: argparse.Namespace) -> int:
     if errors:
         return 1
     print("support feed OK")
+    return 0
+
+
+def cmd_validate_port(args: argparse.Namespace) -> int:
+    repo = args.payloads_repo
+    profile = args.profile
+    payload_id = args.payload_id or profile
+    ap_build = args.version.split("/", 1)[0]
+    target_dir = repo / "src" / "targets" / profile
+    target_h = target_dir / "target.h"
+    p0_h = target_dir / "p0_fingerprint.h"
+    artifact = repo / "artifacts" / profile / "cve-2026-43499-app.so"
+
+    errors: list[str] = []
+    if not target_h.exists():
+        errors.append(f"missing target header: {target_h}")
+    if not p0_h.exists():
+        errors.append(f"missing P0 fingerprint: {p0_h}")
+    if not artifact.exists():
+        errors.append(f"missing release payload: {artifact}")
+
+    if not args.allow_profile_build_mismatch and ap_build not in profile:
+        errors.append(
+            f"firmware AP build {ap_build} does not match profile {profile}; "
+            "use an exact profile for this firmware instead of replacing another build"
+        )
+
+    target_text = target_h.read_text(encoding="utf-8", errors="replace") if target_h.exists() else ""
+    fingerprint_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+"([^"]+)"', target_text)
+    if fingerprint_match:
+        fingerprint = fingerprint_match.group(1)
+        if ap_build not in fingerprint:
+            errors.append(f"BUILD_FINGERPRINT does not contain AP build {ap_build}: {fingerprint}")
+    else:
+        errors.append("target.h does not define BUILD_FINGERPRINT")
+
+    expected_p0_include = f'targets/{profile}/p0_fingerprint.h'
+    if target_text and expected_p0_include not in target_text:
+        errors.append(f"target.h does not reference {expected_p0_include}")
+
+    p0_text = p0_h.read_text(encoding="utf-8", errors="replace") if p0_h.exists() else ""
+    rows = re.findall(r"\{\s*0x[0-9a-fA-F]{6}ULL,\s*\{", p0_text)
+    if p0_text and len(rows) != 32:
+        errors.append(f"p0_fingerprint.h should contain 32 slide rows, found {len(rows)}")
+
+    feed_path = repo / "support" / "targets-v3.json"
+    data = json.loads(feed_path.read_text(encoding="utf-8"))
+    entries = [p for p in data.get("payloads", []) if p.get("payloadId") == payload_id]
+    if len(entries) != 1:
+        errors.append(f"support feed should contain exactly one entry for {payload_id}, found {len(entries)}")
+    elif args.kernel_version not in entries[0].get("kernelVersions", []):
+        errors.append(f"support feed entry does not include kernel version {args.kernel_version}")
+
+    if errors:
+        for error in errors:
+            print(f"[FAIL] {error}", file=sys.stderr)
+        return 1
+    print("offline port gates OK")
     return 0
 
 

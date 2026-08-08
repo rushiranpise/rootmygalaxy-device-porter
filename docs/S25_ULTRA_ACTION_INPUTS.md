@@ -22,9 +22,10 @@ supported S25 Ultra target, use:
 ```text
 payloads_repo: rushiranpise/Root-My-Galaxy-Payloads
 profile: pa3q-S938NKSUACZF1
+payload_id: galaxy-s25-series-2026-06-07
 model: SM-S938N
 region: KOO
-version: latest
+version: S938NKSUACZF1/S938NOKRACZF1/S938NKSUACZE9/S938NKSUACZF1
 source_target: pa3q-S938NKSUACZF1
 replace_existing_target: true
 probe_offset: 0x1f0000
@@ -41,8 +42,10 @@ Notes:
   That is useful for real ports, but for a pure S25 smoke test use a scratch
   profile name or delete the generated branch after testing.
 - Use `firmware_url` when you already have a direct firmware ZIP URL. Leave it
-  empty to make the action call `samloader`. Use `version: latest` to make the
-  action resolve the `Latest Stable Version` with `samloader check-update`.
+  empty to make the action call `samloader`.
+- Do not use `version: latest` to reproduce an older supported target. The
+  current latest stable AP is newer than `pa3q-S938NKSUACZF1` and must use a
+  new profile with independently derived offsets.
 - The current support-feed entry is shared across S25/S25+/S25 Edge/S25 Ultra
   regional models. A real support PR should preserve that shared payload shape
   unless the new firmware truly needs a separate artifact.

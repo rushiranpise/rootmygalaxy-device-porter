@@ -10,6 +10,9 @@ on:
       profile:
         description: payload profile, for example a36xq-A366WVLS3AYG1
         required: true
+      payload_id:
+        description: support feed payloadId; defaults to profile for one-profile payloads
+        required: false
       model:
         description: exact Build.MODEL, for example SM-A366W
         required: true
@@ -110,6 +113,7 @@ jobs:
               version="$(python3 -c 'from pathlib import Path; import re, sys; text = Path(".work/${{ inputs.profile }}/samloader-check-update.txt").read_text(); match = re.search(r"Latest Stable Version:\s*([A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+)", text); sys.exit("samloader check-update did not print a latest stable four-part version") if not match else print(match.group(1))')"
               echo "Resolved latest firmware version: $version"
             fi
+            echo "$version" > ".work/${{ inputs.profile }}/resolved-version.txt"
             samloader download \
               --model "${{ inputs.model }}" \
               --region "${{ inputs.region }}" \
@@ -124,7 +128,7 @@ jobs:
             --profile "${{ inputs.profile }}" \
             --model "${{ inputs.model }}" \
             --region "${{ inputs.region }}" \
-            --version "${{ inputs.version }}" \
+            --version "$(cat ".work/${{ inputs.profile }}/resolved-version.txt")" \
             --workdir ".work/${{ inputs.profile }}"
           rmg-port extract-kernel \
             --firmware-zip ".work/${{ inputs.profile }}/firmware.zip" \
@@ -157,7 +161,7 @@ jobs:
             --profile "${{ inputs.profile }}" \
             --model "${{ inputs.model }}" \
             --region "${{ inputs.region }}" \
-            --version "${{ inputs.version }}" \
+            --version "$(cat ".work/${{ inputs.profile }}/resolved-version.txt")" \
             --kernel ".work/${{ inputs.profile }}/kernel" \
             --kernel-release "${{ inputs.kernel_release }}"
 
@@ -176,12 +180,19 @@ jobs:
           rmg-port add-feed-entry \
             --payloads-repo ../payloads \
             --profile "${{ inputs.profile }}" \
+            --payload-id "${{ inputs.payload_id || inputs.profile }}" \
             --display-name "${{ inputs.display_name }}" \
             --model "${{ inputs.model }}" \
             --kernel-version "${{ inputs.kernel_version }}" \
             --exploit-path "../payloads/artifacts/${{ inputs.profile }}/cve-2026-43499-app.so" \
             --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}"
           rmg-port validate-feed --payloads-repo ../payloads
+          rmg-port validate-port \
+            --payloads-repo ../payloads \
+            --profile "${{ inputs.profile }}" \
+            --payload-id "${{ inputs.payload_id || inputs.profile }}" \
+            --version "$(cat ".work/${{ inputs.profile }}/resolved-version.txt")" \
+            --kernel-version "${{ inputs.kernel_version }}"
           rmg-port checklist --payloads-repo ../payloads --profile "${{ inputs.profile }}"
 
       - name: Open pull request

@@ -189,7 +189,9 @@ jobs:
         working-directory: payloads
         env:
           GH_TOKEN: ${{ secrets.PAYLOADS_PR_TOKEN }}
+          PAYLOADS_PR_TOKEN: ${{ secrets.PAYLOADS_PR_TOKEN }}
         run: |
+          test -n "$PAYLOADS_PR_TOKEN"
           branch="device-port/${{ inputs.profile }}"
           git config user.name "rootmygalaxy-device-porter"
           git config user.email "rootmygalaxy-device-porter@users.noreply.github.com"
@@ -199,6 +201,7 @@ jobs:
                   support/targets-v3.json \
                   docs
           git commit -m "Add ${{ inputs.profile }} payload profile"
+          git remote set-url origin "https://x-access-token:${PAYLOADS_PR_TOKEN}@github.com/${{ inputs.payloads_repo }}.git"
           git push --force-with-lease origin "$branch"
           gh pr create \
             --repo "${{ inputs.payloads_repo }}" \

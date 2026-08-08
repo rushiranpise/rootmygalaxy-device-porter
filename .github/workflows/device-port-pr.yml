@@ -115,7 +115,12 @@ jobs:
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
-          git -C linux-src sparse-checkout set tools/bpf/bpftool tools/lib/bpf tools/include scripts
+          git -C linux-src sparse-checkout set \
+            tools/bpf/bpftool \
+            tools/build \
+            tools/include \
+            tools/lib \
+            scripts
           make -C linux-src/tools/bpf/bpftool -j"$(nproc)"
           echo "BPFTOOL=$PWD/linux-src/tools/bpf/bpftool/bpftool" >> "$GITHUB_ENV"
 

@@ -111,18 +111,18 @@ jobs:
           python3 -m pip install ./porter[lz4]
           python3 -m pip install vmlinux-to-elf pyelftools
 
-      - name: Build standalone bpftool
+      - name: Prepare optional bpftool
         run: |
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
-          git -C linux-src sparse-checkout set \
-            tools/bpf/bpftool \
-            tools/build \
-            tools/include \
-            tools/lib \
-            scripts
-          make -C linux-src/tools/bpf/bpftool -j"$(nproc)"
-          echo "BPFTOOL=$PWD/linux-src/tools/bpf/bpftool/bpftool" >> "$GITHUB_ENV"
+          BPFTOOL="$(command -v bpftool || true)"
+          if [ -z "$BPFTOOL" ]; then
+            BPFTOOL="$(find /usr/lib/linux-tools-* -name bpftool -type f 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [ -n "$BPFTOOL" ]; then
+            echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
+          else
+            echo "BPFTOOL=" >> "$GITHUB_ENV"
+            echo "bpftool unavailable; raw BTF header validation will still run."
+          fi
 
       - name: Install Android NDK
         run: |

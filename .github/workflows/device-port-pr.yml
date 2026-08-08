@@ -96,7 +96,7 @@ jobs:
               -o ".work/${{ inputs.profile }}/firmware.zip" \
               "${{ inputs.firmware_url }}"
           else
-            python3 -m pip install samloader
+            cargo install samloader --locked
             samloader download \
               --model "${{ inputs.model }}" \
               --region "${{ inputs.region }}" \

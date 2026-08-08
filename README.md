@@ -39,7 +39,7 @@ python -m pip install -e .
 
 Optional external tools used by specific steps:
 
-- `samloader-rs` or `samloader` for Samsung firmware downloads;
+- `samloader-rs` (`cargo install samloader`) for Samsung firmware downloads;
 - `lz4` Python package for `.lz4` image extraction;
 - `vmlinux-to-elf`, `llvm-nm`, `llvm-objdump`, `bpftool`, and `pahole` for
   symbol/BTF work;

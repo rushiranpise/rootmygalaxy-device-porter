@@ -7,7 +7,7 @@ By default it targets `rushiranpise/Root-My-Galaxy-Payloads`.
 ## What It Can Automate
 
 - checkout the porter repo and payload repo;
-- download firmware from a direct URL or with `samloader`;
+- download firmware from a direct URL or with `samloader-rs`;
 - extract `boot.img`, the raw kernel, and BTF when present;
 - generate `p0_fingerprint.h`;
 - create `src/targets/<profile>` from an existing target scaffold;

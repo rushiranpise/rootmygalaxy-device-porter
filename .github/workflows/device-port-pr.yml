@@ -72,6 +72,15 @@ on:
       kernelsu_artifact:
         description: existing KernelSU path in payload repo, for example kernelsu/ksud-A366WVLS3AYG1-kdp
         required: true
+      kernelsu_ko_artifact:
+        description: optional standalone KernelSU .ko path in payload repo
+        required: false
+      check_symbol_log:
+        description: optional KernelSU check_symbol log path in payload repo
+        required: false
+      module_audit_log:
+        description: optional KernelSU module audit log path in payload repo
+        required: false
       dry_run:
         description: build and validate, but do not open a PR
         required: true
@@ -99,11 +108,12 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip tar make clang llvm lz4 python3-pip
+          sudo apt-get install -y curl unzip tar make clang llvm lz4 python3-pip bpftool kmod
 
       - name: Install porter
         run: |
           python3 -m pip install ./porter[lz4]
+          python3 -m pip install vmlinux-to-elf
 
       - name: Install Android NDK
         run: |
@@ -157,6 +167,18 @@ jobs:
           rmg-port extract-btf \
             --kernel ".work/${{ inputs.profile }}/kernel" \
             --out ".work/${{ inputs.profile }}/vmlinux.btf" || true
+          if command -v vmlinux-to-elf >/dev/null 2>&1; then
+            vmlinux-to-elf ".work/${{ inputs.profile }}/kernel" \
+              ".work/${{ inputs.profile }}/vmlinux.elf"
+          else
+            python3 -m vmlinux_to_elf ".work/${{ inputs.profile }}/kernel" \
+              ".work/${{ inputs.profile }}/vmlinux.elf"
+          fi
+          llvm-nm --numeric-sort ".work/${{ inputs.profile }}/vmlinux.elf" \
+            > ".work/${{ inputs.profile }}/vmlinux.nm"
+          llvm-objdump --disassemble-symbols=worker_thread \
+            ".work/${{ inputs.profile }}/vmlinux.elf" \
+            > ".work/${{ inputs.profile }}/worker_thread.objdump" || true
           if command -v bpftool >/dev/null 2>&1 && [ -f ".work/${{ inputs.profile }}/vmlinux.btf" ]; then
             bpftool btf dump file ".work/${{ inputs.profile }}/vmlinux.btf" format raw \
               > ".work/${{ inputs.profile }}/vmlinux-btf.raw"
@@ -217,6 +239,20 @@ jobs:
           if [ "$REQUIRE_BTF" = "true" ]; then
             btf_arg="--btf .work/${{ inputs.profile }}/vmlinux.btf"
           fi
+          ko_arg=""
+          if [ -n "${{ inputs.kernelsu_ko_artifact }}" ]; then
+            ko_arg="--kernelsu-ko-path ../payloads/${{ inputs.kernelsu_ko_artifact }}"
+            modinfo "../payloads/${{ inputs.kernelsu_ko_artifact }}" \
+              > ".work/${{ inputs.profile }}/kernelsu.modinfo"
+          fi
+          check_symbol_arg=""
+          if [ -n "${{ inputs.check_symbol_log }}" ]; then
+            check_symbol_arg="--check-symbol-log ../payloads/${{ inputs.check_symbol_log }}"
+          fi
+          module_audit_arg=""
+          if [ -n "${{ inputs.module_audit_log }}" ]; then
+            module_audit_arg="--module-audit-log ../payloads/${{ inputs.module_audit_log }}"
+          fi
           rmg-port add-feed-entry \
             --payloads-repo ../payloads \
             --profile "${{ inputs.profile }}" \
@@ -238,14 +274,27 @@ jobs:
             --release-size-max "${{ inputs.release_size_max }}" \
             --kernel ".work/${{ inputs.profile }}/kernel" \
             --kernelsu-path "../payloads/${{ inputs.kernelsu_artifact }}" \
+            $ko_arg \
             $btf_arg
-          if [ "$REQUIRE_ANALYSIS_ARTIFACTS" = "true" ]; then
+          analysis_args=""
+          if [ -f ".work/${{ inputs.profile }}/vmlinux-btf.raw" ]; then
+            analysis_args="$analysis_args --btf-raw .work/${{ inputs.profile }}/vmlinux-btf.raw"
+          fi
+          if [ -s ".work/${{ inputs.profile }}/worker_thread.objdump" ]; then
+            analysis_args="$analysis_args --worker-objdump .work/${{ inputs.profile }}/worker_thread.objdump"
+          fi
+          if [ -f ".work/${{ inputs.profile }}/kernelsu.modinfo" ]; then
+            analysis_args="$analysis_args --modinfo .work/${{ inputs.profile }}/kernelsu.modinfo"
+          fi
+          if [ "$REQUIRE_ANALYSIS_ARTIFACTS" = "true" ] || [ -f ".work/${{ inputs.profile }}/vmlinux.nm" ]; then
             rmg-port validate-analysis \
               --payloads-repo ../payloads \
               --profile "${{ inputs.profile }}" \
               --vmlinux-nm ".work/${{ inputs.profile }}/vmlinux.nm" \
-              --btf-raw ".work/${{ inputs.profile }}/vmlinux-btf.raw" \
-              --kernel-release "${{ inputs.kernel_release }}"
+              --kernel-release "${{ inputs.kernel_release }}" \
+              $analysis_args \
+              $check_symbol_arg \
+              $module_audit_arg
           fi
           rmg-port checklist --payloads-repo ../payloads --profile "${{ inputs.profile }}"
 

@@ -731,6 +731,35 @@ def set_define(text: str, macro: str, value: str) -> str:
     return add_define_before_endif(text, macro, value)
 
 
+def fmt_like(text: str, macro: str, value: int) -> str:
+    """Render a derived number using the template's existing literal style.
+
+    The repo's committed headers are not uniform: large symbol offsets are
+    8-digit padded hex with a ULL suffix (0x013d9d48ULL), small struct member
+    offsets are unpadded hex without a suffix (FOPS_OWNER_OFF 0x00), and the
+    configfs buffer offsets are decimal (CFG_PAGE_OFF 16). Matching the
+    template's style keeps derived headers byte-compatible with the scaffold
+    so a re-derivation of an existing target produces no cosmetic diff.
+    """
+    m = re.search(rf"(?m)^\s*#define\s+{re.escape(macro)}\s+([^\s\\]+)", text)
+    if m:
+        tok = m.group(1)
+        hm = re.match(r"0[xX]([0-9a-fA-F]+)(ULL|LL|L)?$", tok)
+        if hm:
+            width = max(len(hm.group(1)), 1)
+            return f"0x{value:0{width}x}{hm.group(2) or ''}"
+        dm = re.match(r"[+-]?\d+(ULL|LL|L)?$", tok)
+        if dm:
+            return f"{value}{dm.group(1) or ''}"
+    # macro missing from the template (append path) or unknown literal style:
+    # repo convention is 8-digit padded hex with ULL
+    return f"0x{value:08x}ULL"
+
+
+def set_define_num(text: str, macro: str, value: int) -> str:
+    return set_define(text, macro, fmt_like(text, macro, value))
+
+
 def cmd_gen_target_h(args: argparse.Namespace) -> int:
     text = args.template.read_text(encoding="utf-8", errors="replace")
     report: list[str] = [f"# target.h derivation report for {args.profile}", ""]
@@ -752,7 +781,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
         if base is not None:
             scaffolded("KIMAGE_TEXT_BASE", "no recovered ELF supplied; template value used")
     else:
-        text = set_define(text, "KIMAGE_TEXT_BASE", f"0x{base:x}ULL")
+        text = set_define_num(text, "KIMAGE_TEXT_BASE", base)
         derived(f"KIMAGE_TEXT_BASE = 0x{base:x} (recovered ELF PT_LOAD base)")
 
     # --- firmware identity ------------------------------------------------
@@ -809,7 +838,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
                 scaffolded(macro, f"symbol {symbol} not in recovered vmlinux")
                 continue
             offset = addr - base
-            text = set_define(text, macro, f"0x{offset:x}ULL")
+            text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (nm {symbol} - base)")
         for macro, (symbol, struct_name, member) in COMPOSITE_SYMBOL_MACROS.items():
             addr = nm.get(symbol)
@@ -818,7 +847,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
                 scaffolded(macro, f"need nm[{symbol}] and BTF {struct_name}.{member}")
                 continue
             offset = addr - base + member_off
-            text = set_define(text, macro, f"0x{offset:x}ULL")
+            text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (nm {symbol} + BTF {struct_name}.{member})")
 
     # --- struct offsets from raw BTF ---------------------------------------
@@ -831,7 +860,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             if offset is None:
                 scaffolded(macro, f"BTF task_struct.{member} missing")
                 continue
-            text = set_define(text, macro, f"0x{offset:x}ULL")
+            text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (BTF task_struct.{member})")
         work = structs.get("work_struct", {}).get("members", {})
         for member, macro in WORK_STRUCT_MACROS.items():
@@ -839,7 +868,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             if offset is None:
                 scaffolded(macro, f"BTF work_struct.{member} missing")
                 continue
-            text = set_define(text, macro, f"0x{offset:x}ULL")
+            text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (BTF work_struct.{member})")
         page = structs.get("page", {})
         page_members = page.get("members", {})
@@ -848,10 +877,10 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             if offset is None:
                 scaffolded(macro, f"BTF page.{member} missing")
                 continue
-            text = set_define(text, macro, f"0x{offset:x}ULL")
+            text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (BTF page.{member})")
         if page.get("size"):
-            text = set_define(text, "STRUCT_PAGE_SIZE", f"0x{page['size']:x}")
+            text = set_define_num(text, "STRUCT_PAGE_SIZE", page['size'])
             derived(f"STRUCT_PAGE_SIZE = 0x{page['size']:x} (BTF sizeof(struct page))")
         fops = structs.get("file_operations", {})
         fops_members = fops.get("members", {})
@@ -860,18 +889,23 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             if offset is None:
                 scaffolded(macro, f"BTF file_operations.{member} missing")
                 continue
-            text = set_define(text, macro, f"0x{offset:x}ULL")
+            text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (BTF file_operations.{member})")
-        if fops.get("size"):
-            text = set_define(text, "SIZEOF_FILE_OPERATIONS", f"0x{fops['size']:x}")
+        if fops.get("size") and re.search(rf"(?m)^\s*#define\s+SIZEOF_FILE_OPERATIONS\b", text):
+            text = set_define_num(text, "SIZEOF_FILE_OPERATIONS", fops['size'])
             derived(f"SIZEOF_FILE_OPERATIONS = 0x{fops['size']:x} (BTF sizeof(struct file_operations))")
+        elif fops.get("size"):
+            report.append(
+                "- [INFO] SIZEOF_FILE_OPERATIONS not emitted: template does not define it, "
+                "and FOPS_SHOW_FDINFO_OFF satisfies the size gate"
+            )
 
         # best-effort groups
         for struct_name, first_macro, members in BEST_EFFORT_GROUPS:
             s = structs.get(struct_name, {}).get("members", {})
             if all(member in s for member in members):
                 for member, macro in members.items():
-                    text = set_define(text, macro, f"0x{s[member]:x}ULL")
+                    text = set_define_num(text, macro, s[member])
                     derived(f"{macro} = 0x{s[member]:x} (BTF {struct_name}.{member})")
             else:
                 scaffolded(first_macro, f"BTF {struct_name} missing members")
@@ -885,7 +919,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             sname, members = cfg_candidates[0]
             if all(member in members for member in CONFIGFS_BUFFER_MACROS):
                 for member, macro in CONFIGFS_BUFFER_MACROS.items():
-                    text = set_define(text, macro, f"0x{members[member]:x}")
+                    text = set_define_num(text, macro, members[member])
                     derived(f"{macro} = 0x{members[member]:x} (BTF {sname}.{member})")
             else:
                 scaffolded("CFG_PAGE_OFF", f"BTF {sname} missing configfs buffer members")
@@ -901,7 +935,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
         call_sites = find_worker_schedule_call_sites(args.worker_objdump.read_text(encoding="utf-8", errors="replace"))
         if len(call_sites) == 1:
             caller = call_sites[0] - base
-            text = set_define(text, "SLIDE_TRACEFS_WORKER_CALLER_OFF", f"0x{caller:x}ULL")
+            text = set_define_num(text, "SLIDE_TRACEFS_WORKER_CALLER_OFF", caller)
             derived(f"SLIDE_TRACEFS_WORKER_CALLER_OFF = 0x{caller:x} (next instr after bl schedule in worker_thread)")
         elif len(call_sites) > 1:
             report.append(
@@ -983,9 +1017,9 @@ def cmd_gen_p0(args: argparse.Namespace) -> int:
 
 
 def render_p0_header(probe_offset: int, page_offsets: list[int], rows: list[tuple[int, list[int]]]) -> str:
+    # Byte-compatible with the committed p0_fingerprint.h layout: no comments,
+    # offsets on one line, two qwords per row line with a 4-space continuation.
     lines = [
-        "// Generated from the exact raw Image.",
-        f"// Each row maps actual slide to Image[0x{probe_offset:x} - slide].",
         "#ifndef P0_FINGERPRINT_H",
         "#define P0_FINGERPRINT_H",
         "",
@@ -1003,7 +1037,11 @@ def render_p0_header(probe_offset: int, page_offsets: list[int], rows: list[tupl
         "static const struct p0_fingerprint p0_fingerprints[] = {",
     ]
     for slide, words in rows:
-        lines.append(f"  {{ 0x{slide:06x}ULL, {{ " + ", ".join(f"0x{w:016x}ULL" for w in words) + " } },")
+        w = [f"0x{x:016x}ULL" for x in words]
+        lines.append(f"  {{ 0x{slide:06x}ULL, {{ {w[0]}, {w[1]},")
+        lines.append(f"    {w[2]}, {w[3]},")
+        lines.append(f"    {w[4]}, {w[5]},")
+        lines.append(f"    {w[6]}, {w[7]} }} }},")
     lines.extend(["};", "", "#endif", ""])
     return "\n".join(lines)
 
@@ -1083,7 +1121,8 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     repo = args.payloads_repo
     payload_id = args.payload_id or args.profile
     feed_path = repo / "support" / "targets-v3.json"
-    data = json.loads(feed_path.read_text(encoding="utf-8"))
+    original = feed_path.read_text(encoding="utf-8")
+    data = json.loads(original)
     existing_entries = [p for p in data.get("payloads", []) if p.get("payloadId") == payload_id]
     existing = existing_entries[0] if existing_entries else {}
     exploit_rel = args.exploit_path.resolve().relative_to(repo.resolve()).as_posix()
@@ -1115,7 +1154,11 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     payloads = [p for p in data.get("payloads", []) if p.get("payloadId") != payload_id]
     payloads.append(entry)
     data["payloads"] = payloads
-    feed_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    new_text = json.dumps(data, indent=2) + "\n"
+    # keep the file's existing line endings so a no-op update produces no diff
+    if "\r\n" in original:
+        new_text = new_text.replace("\n", "\r\n")
+    feed_path.write_text(new_text, encoding="utf-8")
     print(f"updated {feed_path}")
     return 0
 

@@ -285,17 +285,35 @@ def main() -> None:
             "WQ_DFL_PWQ_OFF": 0xB0,
             "PWQ_NR_ACTIVE_OFF": 0x5C,
             "POOL_NR_IDLE_OFF": 0x3C,
-            "CFG_PAGE_OFF": 0x10,
-            "CFG_CB_MAX_SIZE_OFF": 0x64,
             "SELINUX_ENFORCING_OFF": 0x025EA478,  # selinux_state + 0x04
             "ASHMEM_MISC_FOPS_OFF": 0x02484970,  # ashmem_misc + 0x10
-            "SIZEOF_FILE_OPERATIONS": 0x110,
         }
         for macro, expected in checks_hex.items():
             m = re.search(rf"#define\s+{re.escape(macro)}\s+0x([0-9a-fA-F]+)", derived_header)
             assert m, f"{macro}: missing from derived header"
             actual = int(m.group(1), 16)
             assert actual == expected, f"{macro}: expected 0x{expected:x}, got 0x{actual:x}"
+        # values must be byte-formatted like the template literal (padded hex,
+        # decimal for CFG_*, no ULL on small offsets) so re-derivation produces
+        # no cosmetic diff against a committed header
+        for expected_line in [
+            "#define KIMAGE_TEXT_BASE 0xffffffc008000000ULL",
+            "#define ASHMEM_FOPS_OFF 0x013d9d48ULL",
+            "#define CALL_USERMODEHELPER_EXEC_WORK_OFF 0x000d4468ULL",
+            "#define FAKE_TASK_PI_LOCK_OFF 0x924",
+            "#define FAKE_TASK_USAGE_OFF 0x40",
+            "#define FOPS_IOCTL_OFF 0x50",
+            "#define WORK_FUNC_OFF 0x18",
+            "#define PWQ_NR_ACTIVE_OFF 0x5c",
+            "#define POOL_NR_IDLE_OFF 0x3c",
+            "#define STRUCT_PAGE_COMPOUND_HEAD_OFF 0x08",
+            "#define CFG_PAGE_OFF 16",
+            "#define CFG_CB_MAX_SIZE_OFF 100",
+        ]:
+            assert expected_line in derived_header, f"missing or format-mismatched line: {expected_line!r}"
+        # the template does not define SIZEOF_FILE_OPERATIONS, so it must not be
+        # appended (FOPS_SHOW_FDINFO_OFF satisfies the size gate)
+        assert "#define SIZEOF_FILE_OPERATIONS" not in derived_header
         for macro, value in [
             ("BUILD_FINGERPRINT", '"samsung/r12sksx/essi:16/BP4A.251205.006/S721NKSSCDZF3:user/release-keys"'),
             ("P0_FINGERPRINT_HEADER", '"targets/essi-S721NKSSCDZF3/p0_fingerprint.h"'),
@@ -311,7 +329,30 @@ def main() -> None:
             if not line.strip():
                 continue
             assert line.startswith(("- [DERIVED]", "- [SCAFFOLD]", "- [WARN]", "- [INFO]", "#")), line
-        print("PASS gen-target-h: header derived, scaffold preserved, report well-formed")
+        print("PASS gen-target-h: header derived, template-style formatting, report well-formed")
+
+        # --- 3e. gen-p0 byte-exact round-trip against a committed fingerprint ---
+        committed_p0 = PAYLOADS / "src" / "targets" / "pa3q-S938NKSUACZF1" / "p0_fingerprint.h"
+        expected_p0 = committed_p0.read_text(encoding="utf-8")
+        probe = 0x1F0000
+        page_offsets = [0x000, 0x200, 0x400, 0x600, 0x800, 0xA00, 0xC00, 0xE00]
+        image = bytearray(probe + 0x1000)
+        rows = re.findall(r"\{ 0x([0-9a-fA-F]{6})ULL, \{ (.*?) \} \}", expected_p0, re.S)
+        assert len(rows) == 32, f"expected 32 rows in committed p0, got {len(rows)}"
+        for slide_hex, words_str in rows:
+            slide = int(slide_hex, 16)
+            words = [int(w, 16) for w in re.findall(r"0x([0-9a-fA-F]{16})ULL", words_str)]
+            assert len(words) == 8, slide_hex
+            for i, word in enumerate(words):
+                src = probe - slide + page_offsets[i]
+                image[src:src + 8] = word.to_bytes(8, "little")
+        p0_kernel = work / "p0-kernel"
+        p0_kernel.write_bytes(bytes(image))
+        p0_out = work / "p0_fingerprint.h"
+        run_cli(["gen-p0", "--kernel", str(p0_kernel), "--probe-offset", "0x1f0000", "--out", str(p0_out)])
+        got_p0 = p0_out.read_text(encoding="utf-8")
+        assert got_p0 == expected_p0, "gen-p0 output does not byte-match the committed pa3q p0_fingerprint.h"
+        print("PASS gen-p0: byte-identical to committed pa3q-S938NKSUACZF1/p0_fingerprint.h")
 
         # --- 3b. missing-inputs fallback ---------------------------------------
         fallback_dir = work / "target-fallback"

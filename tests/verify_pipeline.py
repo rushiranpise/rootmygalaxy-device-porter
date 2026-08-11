@@ -161,7 +161,8 @@ def main() -> None:
              "--template", str(TEMPLATE), "--profile", PROFILE,
              "--fota-props", str(props_path), "--vmlinux-nm", str(nm_path),
              "--elf-base", hex(KIMAGE_TEXT_BASE), "--struct-offsets", str(so_path)], cwd=REPO)
-        header = (payloads / "src" / "targets" / PROFILE / "target.h").read_text(encoding="utf-8")
+        original_target_h = (payloads / "src" / "targets" / PROFILE / "target.h").read_bytes()
+        header = original_target_h.decode("utf-8")
         assert FINGERPRINT in header
         assert f"targets/{PROFILE}/p0_fingerprint.h" in header
         report = (payloads / "src" / "targets" / PROFILE / "port-report.md").read_text(encoding="utf-8")
@@ -215,6 +216,25 @@ def main() -> None:
                               cwd=REPO, capture_output=True, text=True)
         assert proc.returncode != 0 and "kernel file not found" in proc.stdout + proc.stderr
         print("PASS validate-port: green with real inputs, correctly fails on a missing kernel file")
+
+        # legacy (pre-rename) headers name two slide macros differently; the gate
+        # must accept either name (e3q-S928USQS6DZF2 style)
+        legacy_h = payloads / "src" / "targets" / PROFILE / "target.h"
+        legacy_text = legacy_h.read_text(encoding="utf-8").replace(
+            "SLIDE_NFULNL_LOGGER_NAME_OFF", "SLIDE_NFULNL_LOGGER_OFF"
+        ).replace(
+            "SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF", "SLIDE_RANDOM_BOOT_ID_DATA_OFF"
+        )
+        legacy_h.write_text(legacy_text, encoding="utf-8", newline="")
+        run(["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,
+             "--version", FOUR_PART, "--kernel-version", KERNEL_VERSION,
+             "--kernel-release", "6.1.157-android14-11",
+             "--kernel", str(w / PROFILE / "kernel"),
+             "--btf", str(btf_path),
+             "--kernelsu-path", str(payloads / "kernelsu" / "ksud-s25u-kdp"),
+             "--release-size-max", "200000"], cwd=REPO)
+        legacy_h.write_bytes(original_target_h)
+        print("PASS validate-port: legacy macro names (SLIDE_NFULNL_LOGGER_OFF / SLIDE_RANDOM_BOOT_ID_DATA_OFF) accepted")
 
         run(["validate-analysis", "--payloads-repo", str(payloads), "--profile", PROFILE,
              "--vmlinux-nm", str(nm_path), "--struct-offsets", str(so_path),

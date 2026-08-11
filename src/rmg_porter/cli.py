@@ -1063,9 +1063,13 @@ def cmd_gen_p0(args: argparse.Namespace) -> int:
 
 
 def render_p0_header(probe_offset: int, page_offsets: list[int], rows: list[tuple[int, list[int]]]) -> str:
-    # Byte-compatible with the committed p0_fingerprint.h layout: no comments,
-    # offsets on one line, two qwords per row line with a 4-space continuation.
+    # Byte-compatible with the committed p0_fingerprint.h layout: generator
+    # comments, offsets on one line, two qwords per row line with a 4-space
+    # continuation. (scaffold-target strips the comments when replacing a
+    # comment-less committed file such as pa3q's.)
     lines = [
+        "// Generated from the exact raw Image.",
+        f"// Each row maps actual slide to Image[0x{probe_offset:x} - slide].",
         "#ifndef P0_FINGERPRINT_H",
         "#define P0_FINGERPRINT_H",
         "",
@@ -1115,10 +1119,20 @@ def cmd_scaffold_target(args: argparse.Namespace) -> int:
     if args.p0_header:
         p0_out = dst / "p0_fingerprint.h"
         p0_text = Path(args.p0_header).read_text(encoding="utf-8", errors="replace")
-        # when replacing an existing committed (CRLF) fingerprint, match its
-        # line endings so the round-trip produces no whole-file EOL diff
-        if p0_out.exists() and b"\r\n" in p0_out.read_bytes():
+        # match the existing committed file's style (CRLF line endings and the
+        # leading generator comment block) so a re-derivation is byte-identical
+        old_p0 = p0_out.read_bytes() if p0_out.exists() else b""
+        if b"\r\n" in old_p0:
             p0_text = p0_text.replace("\n", "\r\n")
+        if old_p0 and b"// Generated from the exact raw Image." not in old_p0:
+            lines = p0_text.split("\n")
+            while lines and lines[0].startswith("// Generated from the exact raw Image."):
+                lines.pop(0)
+                if lines and lines[0].startswith("// Each row maps actual slide"):
+                    lines.pop(0)
+                if lines and lines[0].strip() == "":
+                    lines.pop(0)
+            p0_text = "\n".join(lines)
         p0_out.write_text(p0_text, encoding="utf-8", newline="")
     readme = dst / "README.md"
     if args.write_readme and not readme.exists():
@@ -1342,14 +1356,16 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
         "ANON_PIPE_BUF_OPS_OFF",
         "CALL_USERMODEHELPER_EXEC_WORK_OFF",
         "SYSTEM_UNBOUND_WQ_OFF",
-        "SLIDE_NFULNL_LOGGER_NAME_OFF",
-        "SLIDE_NFULNL_LOGGER_OBJECT_OFF",
-        "SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF",
         "SLIDE_SYSCTL_BOOTID_OFF",
         "FAKE_WAITER_TASK_OFF",
         "WORK_FUNC_OFF",
     ]
     required_macro_groups = [
+        # legacy headers name these differently (SLIDE_NFULNL_LOGGER_OFF,
+        # SLIDE_LOGGERS_0_1_OFF, SLIDE_RANDOM_BOOT_ID_DATA_OFF)
+        ("nfnetlink logger name", ["SLIDE_NFULNL_LOGGER_NAME_OFF", "SLIDE_NFULNL_LOGGER_OFF"]),
+        ("nfnetlink logger object", ["SLIDE_NFULNL_LOGGER_OBJECT_OFF", "SLIDE_LOGGERS_0_1_OFF"]),
+        ("random boot_id data ptr", ["SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF", "SLIDE_RANDOM_BOOT_ID_DATA_OFF"]),
         ("file_operations size", ["SIZEOF_FILE_OPERATIONS", "FOPS_SHOW_FDINFO_OFF"]),
         ("task usage offset", ["TASK_USAGE_OFF", "FAKE_TASK_USAGE_OFF"]),
         ("task pi_lock offset", ["TASK_PI_LOCK_OFF", "FAKE_TASK_PI_LOCK_OFF"]),

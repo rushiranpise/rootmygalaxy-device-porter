@@ -356,6 +356,19 @@ def main() -> None:
         p0_out = work / "p0_fingerprint.h"
         run_cli(["gen-p0", "--kernel", str(p0_kernel), "--probe-offset", "0x1f0000", "--out", str(p0_out)])
         got_p0 = p0_out.read_text(encoding="utf-8")
+        # gen-p0 emits the generator comment block (repo convention for q7q and
+        # friends); a committed comment-less file like pa3q's keeps byte-exactness
+        # because scaffold-target strips the comments before install. Mirror that
+        # here so the round-trip assertion is on content, not the comment block.
+        if "// Generated from the exact raw Image." not in expected_p0:
+            got_lines = got_p0.split("\n")
+            while got_lines and got_lines[0].startswith("// Generated from the exact raw Image."):
+                got_lines.pop(0)
+                if got_lines and got_lines[0].startswith("// Each row maps actual slide"):
+                    got_lines.pop(0)
+                if got_lines and got_lines[0].strip() == "":
+                    got_lines.pop(0)
+            got_p0 = "\n".join(got_lines)
         assert got_p0 == expected_p0, "gen-p0 output does not byte-match the committed pa3q p0_fingerprint.h"
         print("PASS gen-p0: byte-identical to committed pa3q-S938NKSUACZF1/p0_fingerprint.h")
 

@@ -586,6 +586,25 @@ SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
     "COPY_SPLICE_READ_OFF": ("copy_splice_read", "filemap_splice_read"),
 }
 
+# legacy headers name the slide macros differently; when a template already
+# defines the legacy name, a re-derivation must not append the new-style
+# alias (it would carry the same value and create a spurious diff).
+MACRO_NAME_EQUIVALENTS: dict[str, tuple[str, ...]] = {
+    "SLIDE_NFULNL_LOGGER_NAME_OFF": ("SLIDE_NFULNL_LOGGER_OFF",),
+    "SLIDE_NFULNL_LOGGER_OBJECT_OFF": ("SLIDE_LOGGERS_0_1_OFF",),
+    "SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF": ("SLIDE_RANDOM_BOOT_ID_DATA_OFF",),
+}
+
+
+def template_has_equivalent(text: str, macro: str) -> str | None:
+    """Return the legacy macro name in the template that already carries the
+    same value as `macro`, or None. Used to avoid appending duplicate
+    new-style aliases when re-deriving legacy-style headers."""
+    for equiv in MACRO_NAME_EQUIVALENTS.get(macro, ()):
+        if re.search(rf"(?m)^\s*#define\s+{re.escape(equiv)}\b", text):
+            return equiv
+    return None
+
 
 def resolve_symbol(nm: dict[str, int], macro: str, symbol: str) -> tuple[str, int] | None:
     """Return (found_symbol, address) for a macro's symbol, trying aliases."""
@@ -881,6 +900,13 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
                 continue
             found_symbol, addr = resolved
             offset = addr - base
+            equiv = template_has_equivalent(text, macro)
+            if equiv is not None:
+                report.append(
+                    f"- [INFO] {macro} = 0x{offset:x} (nm {found_symbol} - base) "
+                    f"not emitted: template defines equivalent {equiv}"
+                )
+                continue
             text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (nm {found_symbol} - base)")
         for macro, (symbol, struct_name, member) in COMPOSITE_SYMBOL_MACROS.items():
@@ -890,6 +916,13 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
                 scaffolded(macro, f"need nm[{symbol}] and BTF {struct_name}.{member}")
                 continue
             offset = addr - base + member_off
+            equiv = template_has_equivalent(text, macro)
+            if equiv is not None:
+                report.append(
+                    f"- [INFO] {macro} = 0x{offset:x} (nm {symbol} + BTF {struct_name}.{member}) "
+                    f"not emitted: template defines equivalent {equiv}"
+                )
+                continue
             text = set_define_num(text, macro, offset)
             derived(f"{macro} = 0x{offset:x} (nm {symbol} + BTF {struct_name}.{member})")
 

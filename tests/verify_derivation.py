@@ -408,6 +408,43 @@ def main() -> None:
         assert kernel_release_from_image(b"no banner here") is None
         print("PASS kernel release: banner detected past embedded garbage, absent banner -> None")
 
+        # --- 3h. legacy macro-name equivalents ----------------------------------
+        # A legacy-style template (e3q-S928USQS6DZF2) names the slide macros
+        # SLIDE_NFULNL_LOGGER_OFF / SLIDE_LOGGERS_0_1_OFF /
+        # SLIDE_RANDOM_BOOT_ID_DATA_OFF; re-deriving it must NOT append the
+        # new-style aliases (they would duplicate the same value and diff).
+        legacy_template = work / "target-legacy.h"
+        legacy_text = TEMPLATE.read_text(encoding="utf-8")
+        for new_name, legacy_name in [
+            ("SLIDE_NFULNL_LOGGER_NAME_OFF", "SLIDE_NFULNL_LOGGER_OFF"),
+            ("SLIDE_NFULNL_LOGGER_OBJECT_OFF", "SLIDE_LOGGERS_0_1_OFF"),
+            ("SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF", "SLIDE_RANDOM_BOOT_ID_DATA_OFF"),
+        ]:
+            assert new_name in legacy_text, new_name
+            legacy_text = legacy_text.replace(new_name, legacy_name)
+        legacy_template.write_text(legacy_text, encoding="utf-8")
+        legacy_dir = work / "target-legacy"
+        legacy_dir.mkdir()
+        run_cli(
+            [
+                "gen-target-h",
+                "--target-dir", str(legacy_dir),
+                "--template", str(legacy_template),
+                "--profile", "e3q-S928USQS6DZF2",
+                "--elf-base", hex(KIMAGE_TEXT_BASE),
+                "--vmlinux-nm", str(nm_path),
+                "--struct-offsets", str(so_path),
+            ],
+            cwd=REPO,
+        )
+        legacy_hdr = (legacy_dir / "target.h").read_text(encoding="utf-8")
+        for new_name in ("SLIDE_NFULNL_LOGGER_NAME_OFF", "SLIDE_NFULNL_LOGGER_OBJECT_OFF",
+                         "SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF"):
+            assert f"#define {new_name}" not in legacy_hdr, f"legacy template got appended {new_name}"
+        legacy_report = (legacy_dir / "port-report.md").read_text(encoding="utf-8")
+        assert "not emitted: template defines equivalent SLIDE_LOGGERS_0_1_OFF" in legacy_report, legacy_report
+        print("PASS legacy equivalents: new-style slide macros not appended when legacy names carry the value")
+
         # --- 3b. missing-inputs fallback ---------------------------------------
         fallback_dir = work / "target-fallback"
         fallback_dir.mkdir()

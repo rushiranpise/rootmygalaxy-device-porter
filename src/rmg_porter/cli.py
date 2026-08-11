@@ -641,6 +641,34 @@ CONFIGFS_BUFFER_MACROS: dict[str, str] = {
     "cb_max_size": "CFG_CB_MAX_SIZE_OFF",
 }
 
+# macros that are never auto-derived; the report must list them explicitly so
+# the scaffold provenance is complete (they come from the source target).
+NEVER_DERIVED_MACROS: tuple[str, str, ...] = (
+    ("P0_PAGE_OFFSET", "direct-map identity / page offset"),
+    ("P0_PHYS_OFFSET", "physical load address (sboot disassembly)"),
+    ("P0_KERNEL_PHYS_LOAD", "kernel physical load address (sboot disassembly)"),
+    ("SLIDE_TRACEFS_EVENT_ID", "tracefs sched_blocked_reason event id"),
+    ("SLIDE_PSELECT_WORD_SHIFT", "pselect6 fd-set qword layout"),
+    ("SLIDE_NFULNL_LOGGER_NAME_OFF", "nfnetlink_log name string target"),
+    ("SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF", "random_table[] boot_id data pointer"),
+    ("LOCK_OFF", "fake-task page layout"),
+    ("W0_OFF", "fake-task page layout"),
+    ("FOPS_OFF", "fake-task page layout"),
+    ("SCRATCH_OFF", "fake-task page layout"),
+    ("RIGHT_OFF", "fake-task page layout"),
+    ("LEFT_OFF", "fake-task page layout"),
+    ("FAKE_TASK_OFF", "fake-task page layout"),
+    ("FAKE_WAITER_TREE_PRIO_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_TREE_DEADLINE_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_PI_TREE_ENTRY_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_PI_TREE_PRIO_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_PI_TREE_DEADLINE_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_TASK_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_LOCK_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_WAKE_STATE_OFF", "fake waiter layout"),
+    ("FAKE_WAITER_WW_CTX_OFF", "fake waiter layout"),
+)
+
 
 def elf_load_base(path: Path) -> int | None:
     """Recovered vmlinux base = lowest PT_LOAD p_vaddr (vmlinux-to-elf sets it)."""
@@ -883,6 +911,12 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
         else:
             scaffolded("SLIDE_TRACEFS_WORKER_CALLER_OFF", "no 'bl schedule' site found in worker_thread objdump")
 
+    # list every macro the derivation never attempts, so the scaffold
+    # provenance is complete even when the value was left untouched
+    for macro, why in NEVER_DERIVED_MACROS:
+        if re.search(rf"(?m)^\s*#define\s+{re.escape(macro)}\b", text):
+            report.append(f"- [SCAFFOLD] {macro} kept from template ({why})")
+
     args.target_dir.mkdir(parents=True, exist_ok=True)
     out = args.target_dir / "target.h"
     out.write_text(text, encoding="utf-8")
@@ -1027,10 +1061,17 @@ def cmd_write_port_doc(args: argparse.Namespace) -> int:
         f"- Kernel release: `{args.kernel_release or 'TODO'}`\n"
         f"- Raw kernel size: `{kernel_size}`\n"
         f"- Raw kernel SHA-256: `{kernel_sha}`\n\n"
+        "## Porting Status\n\n"
+        "Mechanically derived constants (fingerprint, symbol offsets, BTF struct "
+        "offsets) were computed from this exact firmware; see "
+        "`src/targets/<profile>/port-report.md` for the full derived vs scaffolded "
+        "breakdown.\n\n"
         "## Required Manual Review\n\n"
-        "- Replace scaffolded `target.h` offsets with values derived from this exact firmware.\n"
-        "- Confirm tracefs event ID, worker caller offset, and pselect word shift.\n"
-        "- Build and audit the exact KernelSU module and late-load binary.\n"
+        "- Verify scaffolded constants listed in `port-report.md`: physical load "
+        "addresses, tracefs event ID, pselect word shift, fake-task/waiter layout, "
+        "and any offset the recovery could not derive.\n"
+        "- Build and audit the exact KernelSU module and late-load binary (or "
+        "document reuse of a same-KMI artifact).\n"
         "- Run hardware validation on an owned or explicitly authorized device.\n",
         encoding="utf-8",
     )
@@ -1451,10 +1492,16 @@ def cmd_checklist(args: argparse.Namespace) -> int:
     for path, label in checks:
         mark = "OK" if path.exists() else "TODO"
         print(f"[{mark}] {label}: {path}")
-    print("[TODO] derive target.h offsets from target vmlinux/BTF, not copied profiles")
-    print("[TODO] build and audit exact KernelSU KO plus ksud late-load artifact")
+    report = repo / "src" / "targets" / profile / "port-report.md"
+    if report.exists():
+        derived = sum(1 for l in report.read_text(encoding="utf-8").splitlines() if l.startswith("- [DERIVED]"))
+        scaffolded = sum(1 for l in report.read_text(encoding="utf-8").splitlines() if l.startswith("- [SCAFFOLD]"))
+        print(f"[OK] derivation report: {derived} derived, {scaffolded} scaffolded constants")
+    else:
+        print("[TODO] derivation report (port-report.md) missing")
+    print("[TODO] verify scaffolded constants (phys load, tracefs event id, pselect shift, fake-task layout)")
+    print("[TODO] build and audit exact KernelSU KO plus ksud late-load artifact (or document reuse)")
     print("[TODO] run hardware validation on an owned or authorized device")
-    print("[TODO] open PR with generated artifacts, support feed, and docs")
     return 0
 
 

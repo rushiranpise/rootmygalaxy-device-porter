@@ -1623,7 +1623,7 @@ def cmd_validate_analysis(args: argparse.Namespace) -> int:
     }
     if base is not None and nm:
         for macro, symbol in symbol_checks.items():
-            expected = parse_macro_int(target_text, macro)
+            expected = parse_macro_value(target_text, macro)
             resolved = resolve_symbol(nm, macro, symbol)
             if expected is None:
                 errors.append(f"target.h missing numeric {macro}")
@@ -1687,7 +1687,7 @@ def cmd_validate_analysis(args: argparse.Namespace) -> int:
                     ("pi_blocked_on", "FAKE_TASK_PI_BLOCKED_ON_OFF"),
                 ):
                     if member in task_members:
-                        expected = parse_macro_int(target_text, macro)
+                        expected = parse_macro_value(target_text, macro)
                         if expected is None:
                             errors.append(f"target.h missing numeric {macro}")
                         elif expected != task_members[member]:
@@ -1702,14 +1702,14 @@ def cmd_validate_analysis(args: argparse.Namespace) -> int:
                 ):
                     fops_members = structs.get("file_operations", {}).get("members", {})
                     if member in fops_members:
-                        expected = parse_macro_int(target_text, macro)
+                        expected = parse_macro_value(target_text, macro)
                         if expected is not None and expected != fops_members[member]:
                             errors.append(
                                 f"{macro} mismatch: target.h=0x{expected:x} BTF file_operations.{member}=0x{fops_members[member]:x}"
                             )
                 page_members = structs.get("page", {}).get("members", {})
                 if "compound_head" in page_members:
-                    expected = parse_macro_int(target_text, "STRUCT_PAGE_COMPOUND_HEAD_OFF")
+                    expected = parse_macro_value(target_text, "STRUCT_PAGE_COMPOUND_HEAD_OFF")
                     if expected is not None and expected != page_members["compound_head"]:
                         errors.append(
                             f"STRUCT_PAGE_COMPOUND_HEAD_OFF mismatch: target.h=0x{expected:x} "
@@ -1751,6 +1751,15 @@ def parse_macro_int(text: str, macro: str) -> int | None:
     if not match:
         return None
     return int(match.group(1), 0)
+
+
+def parse_macro_value(text: str, macro: str) -> int | None:
+    """Numeric value of a macro, resolving alias/expression definitions too
+    (a36xq-style headers define FAKE_TASK_* as aliases of TASK_*)."""
+    m = re.search(rf"(?m)^\s*#define\s+{re.escape(macro)}\s+([^\n\\]+)", text)
+    if not m:
+        return None
+    return _eval_macro_rhs(text, m.group(1))
 
 
 def local_path_from_raw_url(repo: Path, url: str) -> Path | None:

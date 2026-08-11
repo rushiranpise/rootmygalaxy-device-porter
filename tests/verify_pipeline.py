@@ -243,6 +243,29 @@ def main() -> None:
         run(["checklist", "--payloads-repo", str(payloads), "--profile", PROFILE], cwd=REPO)
         print("PASS validate-analysis + checklist: symbol and BTF cross-checks against derived header")
 
+        # alias-style headers (a36xq/A56) define FAKE_TASK_* as aliases of
+        # TASK_*; validate-analysis must resolve them instead of demanding
+        # literal values
+        alias_h = payloads / "src" / "targets" / PROFILE / "target.h"
+        alias_text = alias_h.read_text(encoding="utf-8")
+        for fake, task in [
+            ("FAKE_TASK_USAGE_OFF", "TASK_USAGE_OFF"),
+            ("FAKE_TASK_PI_LOCK_OFF", "TASK_PI_LOCK_OFF"),
+            ("FAKE_TASK_PI_WAITERS_OFF", "TASK_PI_WAITERS_OFF"),
+        ]:
+            m = re.search(rf"^#define\s+{fake}\s+0x([0-9a-fA-F]+)", alias_text, re.M)
+            assert m, f"header missing literal {fake}"
+            alias_text = alias_text.replace(
+                f"#define {fake} 0x{m.group(1)}",
+                f"#define {task} 0x{m.group(1)}\n#define {fake} {task}",
+            )
+        alias_h.write_text(alias_text, encoding="utf-8", newline="")
+        run(["validate-analysis", "--payloads-repo", str(payloads), "--profile", PROFILE,
+             "--vmlinux-nm", str(nm_path), "--struct-offsets", str(so_path),
+             "--kernel-release", "6.1.157-android14-11"], cwd=REPO)
+        alias_h.write_bytes(original_target_h)
+        print("PASS validate-analysis: FAKE_TASK_* alias definitions resolved against BTF")
+
         # 3b. kernel version vs detected release cross-check
         proc = subprocess.run(CLI + ["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,
                                      "--version", FOUR_PART, "--kernel-version", "6.2.0",

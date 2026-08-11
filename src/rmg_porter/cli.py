@@ -1213,6 +1213,16 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
     if args.kernelsu_ko_path and not args.kernelsu_ko_path.exists():
         errors.append(f"KernelSU KO artifact not found: {args.kernelsu_ko_path}")
 
+    if args.kernel_release:
+        match = re.match(r"\d+\.\d+\.\d+", args.kernel_release)
+        release_leading = match.group(0) if match else args.kernel_release
+        if args.kernel_version != release_leading:
+            errors.append(
+                f"kernel version {args.kernel_version} does not match the leading "
+                f"three parts of the detected kernel release {args.kernel_release} "
+                f"({release_leading}); feed kernelVersions must equal uname -r's leading 3 parts"
+            )
+
     feed_path = repo / "support" / "targets-v3.json"
     data = json.loads(feed_path.read_text(encoding="utf-8"))
     entries = [p for p in data.get("payloads", []) if p.get("payloadId") == payload_id]

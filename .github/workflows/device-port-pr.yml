@@ -53,8 +53,9 @@ on:
         required: true
         default: "0x1f0000"
       kernel_version:
-        description: leading uname -r version used by targets-v3.json, for example 6.6.46
-        required: true
+        description: leading uname -r version used by targets-v3.json, for example 6.6.46; auto-detected from the kernel banner when empty
+        required: false
+        default: ""
       kernel_release:
         description: full kernel release/vermagic; auto-detected from the kernel banner when empty
         required: false
@@ -440,6 +441,15 @@ jobs:
           if [ -f "$w/kernel-release.txt" ]; then
             kernel_release="$(cat "$w/kernel-release.txt")"
           fi
+          kernel_version="${{ inputs.kernel_version }}"
+          if [ -z "$kernel_version" ] && [ -f "$w/kernel-release.txt" ]; then
+            kernel_version="$(cut -d. -f1-3 < "$w/kernel-release.txt")"
+            echo "kernel_version auto-detected: $kernel_version"
+          fi
+          if [ -z "$kernel_version" ]; then
+            echo "kernel_version input is empty and no kernel release was detected from the firmware." >&2
+            exit 1
+          fi
           ksud_path="$(cat ".work/kernelsu-artifact-path.txt" 2>/dev/null || echo '${{ inputs.kernelsu_artifact }}')"
           preserve_arg=""
           if [ "$PRESERVE_EXISTING_FEED_METADATA" = "true" ]; then
@@ -477,7 +487,7 @@ jobs:
             --payload-id "${{ inputs.payload_id || inputs.profile }}" \
             --display-name "${{ inputs.display_name }}" \
             --model "${{ inputs.model }}" \
-            --kernel-version "${{ inputs.kernel_version }}" \
+            --kernel-version "$kernel_version" \
             --exploit-path "../payloads/artifacts/$profile/cve-2026-43499-app.so" \
             --kernelsu-path "../payloads/$ksud_path" \
             $preserve_arg
@@ -487,7 +497,7 @@ jobs:
             --profile "$profile" \
             --payload-id "${{ inputs.payload_id || inputs.profile }}" \
             --version "$(cat "$w/resolved-version.txt")" \
-            --kernel-version "${{ inputs.kernel_version }}" \
+            --kernel-version "$kernel_version" \
             --kernel-release "$kernel_release" \
             --release-size-max "${{ inputs.release_size_max }}" \
             --kernel "$w/kernel" \

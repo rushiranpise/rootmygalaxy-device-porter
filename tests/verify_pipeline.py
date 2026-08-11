@@ -201,6 +201,17 @@ def main() -> None:
         run(["checklist", "--payloads-repo", str(payloads), "--profile", PROFILE], cwd=REPO)
         print("PASS validate-analysis + checklist: symbol and BTF cross-checks against derived header")
 
+        # 3b. kernel version vs detected release cross-check
+        proc = subprocess.run(CLI + ["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,
+                                     "--version", FOUR_PART, "--kernel-version", "6.2.0",
+                                     "--kernel-release", "6.1.157-android14-11",
+                                     "--kernel", str(w / PROFILE / "kernel"),
+                                     "--kernelsu-path", str(payloads / "kernelsu" / "ksud-s25u-kdp"),
+                                     "--release-size-max", "200000"],
+                              cwd=REPO, capture_output=True, text=True)
+        assert proc.returncode != 0 and "does not match the leading" in proc.stdout + proc.stderr
+        print("PASS kernel version gate: feed kernelVersions must match leading 3 parts of the release")
+
         # 4. a wrong-AP fingerprint in the payloads repo header must fail validate-port
         bad = work / "bad-fingerprint.json"
         bad.write_text(json.dumps({"fingerprint": "samsung/r12sksx/essi:16/BP4A.251205.006/ZZ999:user/release-keys"}),

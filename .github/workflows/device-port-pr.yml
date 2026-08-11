@@ -267,9 +267,16 @@ jobs:
           [ -f "$w/vmlinux.elf" ] && derive_args="$derive_args --vmlinux-elf $w/vmlinux.elf"
           [ -f "$w/struct-offsets.json" ] && derive_args="$derive_args --struct-offsets $w/struct-offsets.json"
           [ -f "$w/worker_thread.objdump" ] && derive_args="$derive_args --worker-objdump $w/worker_thread.objdump"
+          template="../payloads/src/targets/${{ inputs.source_target }}/target.h"
+          if [ ! -f "$template" ] && [ -f "../payloads/src/targets/${{ inputs.source_target }}.source-backup/target.h" ]; then
+            # source_target == profile: scaffold-target kept the original header
+            # in <profile>.source-backup before --skip-target-header removed it.
+            template="../payloads/src/targets/${{ inputs.source_target }}.source-backup/target.h"
+            echo "using scaffold source backup as template: $template"
+          fi
           rmg-port gen-target-h \
             --target-dir "../payloads/src/targets/${{ inputs.profile }}" \
-            --template "../payloads/src/targets/${{ inputs.source_target }}/target.h" \
+            --template "$template" \
             --profile "${{ inputs.profile }}" \
             $derive_args
           if [ "$CREATE_PORT_DOC" = "true" ]; then

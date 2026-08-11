@@ -256,14 +256,27 @@ def cmd_extract_kernel(args: argparse.Namespace) -> int:
 
 
 def kernel_release_from_image(image: bytes) -> str | None:
-    """Extract the uname release from the in-image 'Linux version ' banner."""
+    """Extract the uname release from the in-image 'Linux version ' banner.
+
+    Some Samsung kernels embed other strings containing the marker before the
+    real banner (observed on 5.15 images), so scan every occurrence and accept
+    the first token that looks like a release (starts with MAJOR.MINOR.PATCH).
+    """
     marker = b"Linux version "
-    start = image.find(marker)
-    if start < 0:
-        return None
-    rest = image[start + len(marker) :]
-    token = rest.split(b" ", 1)[0].decode("ascii", errors="replace").strip()
-    return token or None
+    start = 0
+    while True:
+        start = image.find(marker, start)
+        if start < 0:
+            return None
+        token = (
+            image[start + len(marker) :]
+            .split(b" ", 1)[0]
+            .decode("ascii", errors="replace")
+            .strip()
+        )
+        if re.match(r"^\d+\.\d+\.\d+", token):
+            return token or None
+        start += len(marker)
 
 
 def extract_ap_archive(firmware_zip: Path, workdir: Path) -> Path:
@@ -1237,12 +1250,9 @@ def find_payload_span(text: str, payload_id: str) -> tuple[int, int, dict] | Non
         except json.JSONDecodeError:
             return None
         if obj.get("payloadId") == payload_id:
-            e = end
-            while e < len(text) and text[e] in " \t\r\n":
-                e += 1
-            if e < len(text) and text[e] == ",":
-                e += 1
-            return idx, e, obj
+            # stop at the object close: the trailing comma (if any) stays in
+            # original[end:] so a span replacement keeps it
+            return idx, end, obj
         idx = end
         while idx < len(text) and text[idx] in " \t\r\n,":
             idx += 1

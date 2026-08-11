@@ -384,6 +384,17 @@ def main() -> None:
         assert "nm copy_splice_read - base" in alias_report, alias_report
         print("PASS splice alias: COPY_SPLICE_READ_OFF derived via copy_splice_read fallback")
 
+        # --- 3g. kernel release banner scanning ---------------------------------
+        # 5.15 Samsung images embed other strings containing the marker before
+        # the real banner; the detector must skip them and keep the release token
+        from rmg_porter.cli import kernel_release_from_image
+
+        junk = b"Linux version \x00smb2_add_credits\x00\x013CIFS:" * 3
+        banner = b"Linux version 5.15.189-android13-8-33413713-abS9180ZHS8FZF5 (kleaf@host) #1"
+        assert kernel_release_from_image(junk + banner) == "5.15.189-android13-8-33413713-abS9180ZHS8FZF5"
+        assert kernel_release_from_image(b"no banner here") is None
+        print("PASS kernel release: banner detected past embedded garbage, absent banner -> None")
+
         # --- 3b. missing-inputs fallback ---------------------------------------
         fallback_dir = work / "target-fallback"
         fallback_dir.mkdir()

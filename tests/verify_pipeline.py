@@ -186,6 +186,18 @@ def main() -> None:
              "--kernelsu-path", str(payloads / "kernelsu" / "ksud-s25u-kdp")], cwd=REPO)
         assert (payloads / "support" / "targets-v3.json").read_bytes() == feed_before
         print("PASS add-feed-entry idempotent: repeated identical update leaves the feed byte-identical")
+        # replace path: updating a middle entry (not the last) must keep valid JSON
+        # and preserve the trailing comma of the replaced span
+        run(["add-feed-entry", "--payloads-repo", str(payloads), "--profile", PROFILE,
+             "--payload-id", "galaxy-s25-series-2026-06-07",
+             "--display-name", "Renamed S25 | Kernel 6.6.98",
+             "--model", "SM-S938N", "--kernel-version", "6.6.98",
+             "--exploit-path", str(payloads / "artifacts" / PROFILE / "cve-2026-43499-app.so"),
+             "--kernelsu-path", str(payloads / "kernelsu" / "ksud-s25u-kdp")], cwd=REPO)
+        feed_data = json.loads((payloads / "support" / "targets-v3.json").read_text(encoding="utf-8"))
+        s25 = [p for p in feed_data["payloads"] if p["payloadId"] == "galaxy-s25-series-2026-06-07"]
+        assert len(s25) == 1 and s25[0]["displayName"] == "Renamed S25 | Kernel 6.6.98", s25
+        print("PASS add-feed-entry replace: middle entry updated in place, feed stays valid JSON")
         run(["validate-feed", "--payloads-repo", str(payloads)], cwd=REPO)
         run(["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,
              "--version", FOUR_PART, "--kernel-version", KERNEL_VERSION,

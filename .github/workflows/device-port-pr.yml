@@ -86,16 +86,12 @@ on:
         required: false
         default: "{}"
       kernelsu_options_json:
-        description: optional JSON for KO/build/audit paths and KernelSU source build settings
+        description: 'optional JSON for KO/build/audit paths, KernelSU source build settings, and allow_build_mismatch (re-port when the exact committed build is retired from FUS), for example {"allow_build_mismatch": true}'
         required: false
         default: "{}"
       dry_run:
         description: build and validate, but do not open a PR
         required: true
-        default: "false"
-      allow_build_mismatch:
-        description: allow the firmware AP build to differ from the profile name (re-porting when the exact committed build is retired from FUS)
-        required: false
         default: "false"
 
 permissions:
@@ -505,6 +501,10 @@ jobs:
             --kernelsu-path "../payloads/$ksud_path" \
             $preserve_arg
           rmg-port validate-feed --payloads-repo ../payloads
+          allow_mismatch=""
+          if [ "$(echo "$KERNELSU_OPTIONS_JSON" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("allow_build_mismatch", False))' 2>/dev/null)" = "True" ]; then
+            allow_mismatch="--allow-profile-build-mismatch"
+          fi
           rmg-port validate-port \
             --payloads-repo ../payloads \
             --profile "$profile" \
@@ -517,7 +517,7 @@ jobs:
             --kernelsu-path "../payloads/$ksud_path" \
             $ko_arg \
             $btf_arg \
-            $([[ "${{ inputs.allow_build_mismatch }}" = "true" ]] && echo "--allow-profile-build-mismatch")
+            $allow_mismatch
           analysis_args=""
           if [ -f "$w/struct-offsets.json" ]; then
             analysis_args="$analysis_args --struct-offsets $w/struct-offsets.json"

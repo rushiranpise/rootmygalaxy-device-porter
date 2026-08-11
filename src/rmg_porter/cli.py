@@ -63,6 +63,43 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--check-update-file", required=True, type=Path)
     p.set_defaults(func=cmd_samloader_version)
 
+    p = sub.add_parser(
+        "extract-fota",
+        help="Extract firmware identity props (ro.build.fingerprint, display id) from meta-data/fota.zip",
+    )
+    p.add_argument("--firmware-zip", required=True, type=Path)
+    p.add_argument("--out", required=True, type=Path)
+    p.set_defaults(func=cmd_extract_fota)
+
+    p = sub.add_parser(
+        "btf-struct",
+        help="Parse a raw BTF blob in pure Python and dump struct sizes and member byte offsets",
+    )
+    p.add_argument("--btf", required=True, type=Path)
+    p.add_argument("--out", required=True, type=Path)
+    p.add_argument(
+        "--structs",
+        required=True,
+        help="comma-separated struct names to extract",
+    )
+    p.set_defaults(func=cmd_btf_struct)
+
+    p = sub.add_parser(
+        "gen-target-h",
+        help="Derive target.h for this firmware from fota props, recovered vmlinux nm/BTF, and ELF base",
+    )
+    p.add_argument("--target-dir", required=True, type=Path, help="src/targets/<profile> in the payloads repo")
+    p.add_argument("--template", required=True, type=Path, help="source target's target.h used as the header scaffold")
+    p.add_argument("--profile", required=True)
+    p.add_argument("--fota-props", type=Path)
+    p.add_argument("--vmlinux-nm", type=Path)
+    p.add_argument("--vmlinux-elf", type=Path)
+    p.add_argument("--elf-base", help="recovered ELF base as hex, overrides ELF segment scan")
+    p.add_argument("--struct-offsets", type=Path)
+    p.add_argument("--worker-objdump", type=Path)
+    p.add_argument("--report", type=Path, help="derivation report output path")
+    p.set_defaults(func=cmd_gen_target_h)
+
     p = sub.add_parser("scaffold-target", help="Create src/targets/<profile> skeleton")
     p.add_argument("--payloads-repo", required=True, type=Path)
     p.add_argument("--profile", required=True)
@@ -70,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--p0-header", type=Path)
     p.add_argument("--replace-existing", action="store_true")
     p.add_argument("--write-readme", action="store_true")
+    p.add_argument(
+        "--skip-target-header",
+        action="store_true",
+        help="copy the scaffold but not the source target.h (use with gen-target-h)",
+    )
     p.set_defaults(func=cmd_scaffold_target)
 
     p = sub.add_parser("write-port-doc", help="Write a generated docs/<model>-<build>.md stub")
@@ -124,6 +166,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--kernel-release")
     p.add_argument("--check-symbol-log", type=Path)
     p.add_argument("--module-audit-log", type=Path)
+    p.add_argument(
+        "--struct-offsets",
+        type=Path,
+        help="btf-struct JSON; cross-checks BTF-derived macros against the raw BTF",
+    )
     p.set_defaults(func=cmd_validate_analysis)
 
     p = sub.add_parser("checklist", help="Print the remaining PR checklist")
@@ -200,7 +247,22 @@ def cmd_extract_kernel(args: argparse.Namespace) -> int:
     print(f"boot.img sha256: {sha256_file(boot_path)}")
     print(f"kernel size: {kernel_size}")
     print(f"kernel sha256: {sha256_file(kernel_path)}")
+    release = kernel_release_from_image(kernel)
+    if release:
+        (args.workdir / "kernel-release.txt").write_text(release + "\n", encoding="utf-8")
+        print(f"kernel release: {release}")
     return 0
+
+
+def kernel_release_from_image(image: bytes) -> str | None:
+    """Extract the uname release from the in-image 'Linux version ' banner."""
+    marker = b"Linux version "
+    start = image.find(marker)
+    if start < 0:
+        return None
+    rest = image[start + len(marker) :]
+    token = rest.split(b" ", 1)[0].decode("ascii", errors="replace").strip()
+    return token or None
 
 
 def extract_ap_archive(firmware_zip: Path, workdir: Path) -> Path:
@@ -277,6 +339,581 @@ def cmd_extract_btf(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_extract_fota(args: argparse.Namespace) -> int:
+    """Read ro.build.* identity props from meta-data/fota.zip inside the firmware zip."""
+    props: dict[str, str] = {}
+    source = None
+    try:
+        with zipfile.ZipFile(args.firmware_zip) as archive:
+            fota_names = [n for n in archive.namelist() if n.endswith("fota.zip")]
+            if not fota_names:
+                raise ValueError(f"no meta-data/fota.zip member in {args.firmware_zip}")
+            fota_name = fota_names[0]
+            with archive.open(fota_name) as src, zipfile.ZipFile(src) as fota:
+                for member in fota.namelist():
+                    if member.endswith("/"):
+                        continue
+                    text = fota.read(member).decode("utf-8", errors="replace")
+                    for line in text.splitlines():
+                        if "=" not in line:
+                            continue
+                        key, _, value = line.partition("=")
+                        key = key.strip()
+                        value = value.strip().strip('"')
+                        if key.startswith("ro.") and key not in props:
+                            props[key] = value
+                            if source is None:
+                                source = f"{fota_name}:{member}"
+    except zipfile.BadZipFile as exc:
+        raise ValueError(
+            f"{args.firmware_zip} is not a valid zip archive; "
+            "fota identity extraction needs the decrypted plain firmware zip"
+        ) from exc
+    if not props:
+        raise ValueError(
+            "no ro.* properties found in fota.zip; cannot derive BUILD_FINGERPRINT, "
+            "supply the fingerprint via the target scaffold instead"
+        )
+    identity = {
+        "fingerprint": props.get("ro.build.fingerprint", ""),
+        "display_id": props.get("ro.build.display.id", ""),
+        "model": props.get("ro.product.model", props.get("ro.product.device", "")),
+        "sdk": props.get("ro.build.version.sdk", ""),
+        "page_size": props.get("ro.product.cpu.abi", ""),
+        "props_source": source or "",
+        "props": props,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(identity, indent=2) + "\n", encoding="utf-8")
+    print(f"fota identity: fingerprint={identity['fingerprint'] or 'MISSING'}")
+    print(f"fota identity: display_id={identity['display_id'] or 'MISSING'}")
+    return 0
+
+
+BTF_KIND_NAMES = {
+    1: "INT",
+    2: "PTR",
+    3: "ARRAY",
+    4: "STRUCT",
+    5: "UNION",
+    6: "ENUM",
+    7: "FWD",
+    8: "TYPEDEF",
+    9: "VOLATILE",
+    10: "CONST",
+    11: "RESTRICT",
+    12: "FUNC",
+    13: "FUNC_PROTO",
+    14: "VAR",
+    15: "DATASEC",
+    16: "FLOAT",
+    17: "DECL_TAG",
+    18: "TYPE_TAG",
+    19: "ENUM64",
+}
+
+
+class BTFError(ValueError):
+    pass
+
+
+@dataclass
+class BTFStruct:
+    name: str
+    kind: int
+    size: int
+    members: dict[str, int]  # member name -> byte offset (byte-aligned only)
+    vlen: int
+
+
+def parse_btf(data: bytes) -> tuple[bytes, list[BTFStruct]]:
+    """Parse a raw little-endian BTF blob; return (string table, struct list).
+
+    Only STRUCT/UNION types are returned. Member offsets that are not
+    byte-aligned are skipped (the porting doc requires rejecting them).
+    """
+    if len(data) < 24:
+        raise BTFError(f"BTF blob too short: {len(data)} bytes")
+    magic, version, flags, header_len, type_off, type_len, str_off, str_len = struct.unpack_from(
+        "<HBBIIIII", data, 0
+    )
+    if magic != 0xEB9F:
+        raise BTFError(f"bad BTF magic 0x{magic:04x}")
+    if version != 1:
+        raise BTFError(f"unsupported BTF version {version}")
+    if flags != 0:
+        raise BTFError(f"unexpected BTF flags 0x{flags:x}")
+    if header_len < 24:
+        raise BTFError(f"BTF header too small: {header_len}")
+    if header_len + type_off + type_len + str_len > len(data):
+        raise BTFError("BTF sections exceed blob bounds")
+    type_start = header_len + type_off
+    type_end = type_start + type_len
+    str_table = data[header_len + str_off : header_len + str_off + str_len]
+
+    def string(name_off: int) -> str:
+        if name_off >= len(str_table):
+            return f"<bad-name-off {name_off}>"
+        end = str_table.find(b"\x00", name_off)
+        if end < 0:
+            return ""
+        return str_table[name_off:end].decode("utf-8", errors="replace")
+
+    structs: list[BTFStruct] = []
+    cursor = type_start
+    while cursor < type_end:
+        if cursor + 12 > type_end:
+            raise BTFError("truncated BTF type record")
+        name_off, info, size_or_type = struct.unpack_from("<III", data, cursor)
+        cursor += 12
+        kind = (info >> 24) & 0x1F
+        vlen = info & 0xFFFF
+        kind_flag = (info >> 31) & 1
+        name = string(name_off)
+        if kind in (4, 5):  # STRUCT / UNION
+            size = size_or_type
+            members: dict[str, int] = {}
+            for _ in range(vlen):
+                if cursor + 12 > type_end:
+                    raise BTFError("truncated BTF struct member")
+                m_name_off, m_type, m_offset = struct.unpack_from("<III", data, cursor)
+                cursor += 12
+                if kind_flag:
+                    bit_offset = m_offset & 0xFFFFFF
+                else:
+                    bit_offset = m_offset
+                m_name = string(m_name_off)
+                if bit_offset & 7:
+                    continue  # reject non-byte-aligned members, per porting doc
+                members[m_name] = bit_offset >> 3
+            structs.append(BTFStruct(name, kind, size, members, vlen))
+        elif kind == 1:  # INT
+            cursor += 4
+        elif kind == 3:  # ARRAY
+            cursor += 12
+        elif kind == 6:  # ENUM
+            cursor += vlen * 8
+        elif kind == 13:  # FUNC_PROTO
+            cursor += vlen * 4
+        elif kind == 14:  # VAR
+            cursor += 4
+        elif kind == 15:  # DATASEC
+            cursor += vlen * 12
+        elif kind == 17:  # DECL_TAG
+            cursor += 4
+        elif kind == 19:  # ENUM64
+            cursor += vlen * 12
+        # PTR, FWD, TYPEDEF, VOLATILE, CONST, RESTRICT, FUNC, FLOAT,
+        # TYPE_TAG have no per-type payload after the 12-byte header.
+    return str_table, structs
+
+
+def cmd_btf_struct(args: argparse.Namespace) -> int:
+    data = args.btf.read_bytes()
+    try:
+        _, structs = parse_btf(data)
+    except BTFError as exc:
+        raise ValueError(f"invalid raw BTF blob {args.btf}: {exc}") from exc
+    by_name: dict[str, BTFStruct] = {}
+    for s in structs:
+        by_name.setdefault(s.name, s)
+    wanted = [name.strip() for name in args.structs.split(",") if name.strip()]
+    result: dict[str, dict] = {}
+    missing: list[str] = []
+    if "all" in wanted:
+        wanted = list(by_name)
+    for name in wanted:
+        s = by_name.get(name)
+        if s is None:
+            missing.append(name)
+            continue
+        result[name] = {"kind": BTF_KIND_NAMES.get(s.kind, str(s.kind)), "size": s.size, "members": s.members}
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps({"structs": result}, indent=2) + "\n", encoding="utf-8")
+    for name in result:
+        print(f"BTF {name}: size=0x{result[name]['size']:x} members={len(result[name]['members'])}")
+    if missing:
+        print(f"warning: structs not found in BTF: {', '.join(missing)}", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# target.h derivation
+# ---------------------------------------------------------------------------
+
+# macro -> symbol name; offset = nm[symbol] - ELF base
+SYMBOL_OFFSET_MACROS: dict[str, str] = {
+    "ASHMEM_FOPS_OFF": "ashmem_fops",
+    "ASHMEM_IOCTL_OFF": "ashmem_ioctl",
+    "ASHMEM_COMPAT_IOCTL_OFF": "compat_ashmem_ioctl",
+    "ASHMEM_MMAP_OFF": "ashmem_mmap",
+    "ASHMEM_OPEN_OFF": "ashmem_open",
+    "ASHMEM_RELEASE_OFF": "ashmem_release",
+    "ASHMEM_SHOW_FDINFO_OFF": "ashmem_show_fdinfo",
+    "CONFIGFS_READ_ITER_OFF": "configfs_read_iter",
+    "CONFIGFS_BIN_WRITE_ITER_OFF": "configfs_bin_write_iter",
+    "COPY_SPLICE_READ_OFF": "generic_file_splice_read",
+    "NOOP_LLSEEK_OFF": "noop_llseek",
+    "INIT_TASK_OFF": "init_task",
+    "ROOT_TASK_GROUP_OFF": "root_task_group",
+    "KMALLOC_CACHES_OFF": "kmalloc_caches",
+    "ANON_PIPE_BUF_OPS_OFF": "anon_pipe_buf_ops",
+    "CALL_USERMODEHELPER_EXEC_WORK_OFF": "call_usermodehelper_exec_work",
+    "SYSTEM_UNBOUND_WQ_OFF": "system_unbound_wq",
+    "SLIDE_NFULNL_LOGGER_OBJECT_OFF": "nfulnl_logger",
+    "SLIDE_SYSCTL_BOOTID_OFF": "sysctl_bootid",
+}
+
+# composite offsets: symbol plus a BTF member offset within that object
+COMPOSITE_SYMBOL_MACROS: dict[str, tuple[str, str, str]] = {
+    # macro -> (symbol, struct, member); offset = nm[symbol] - base + member
+    "ASHMEM_MISC_FOPS_OFF": ("ashmem_misc", "miscdevice", "fops"),
+    "SELINUX_ENFORCING_OFF": ("selinux_state", "selinux_state", "enforcing"),
+}
+
+# BTF struct member -> target.h macro (task_struct members used by the fake task)
+TASK_STRUCT_MACROS: dict[str, str] = {
+    "usage": "FAKE_TASK_USAGE_OFF",
+    "prio": "FAKE_TASK_PRIO_OFF",
+    "normal_prio": "FAKE_TASK_NORMAL_PRIO_OFF",
+    "sched_task_group": "FAKE_TASK_TASK_GROUP_OFF",
+    "pi_lock": "FAKE_TASK_PI_LOCK_OFF",
+    "pi_waiters": "FAKE_TASK_PI_WAITERS_OFF",
+    "pi_top_task": "FAKE_TASK_PI_TOP_TASK_OFF",
+    "pi_blocked_on": "FAKE_TASK_PI_BLOCKED_ON_OFF",
+}
+
+WORK_STRUCT_MACROS: dict[str, str] = {
+    "data": "WORK_DATA_OFF",
+    "entry": "WORK_ENTRY_OFF",
+    "func": "WORK_FUNC_OFF",
+}
+
+PAGE_STRUCT_MACROS: dict[str, str] = {
+    "compound_head": "STRUCT_PAGE_COMPOUND_HEAD_OFF",
+    "slab_cache": "STRUCT_SLAB_CACHE_OFF",
+    "page_type": "STRUCT_PAGE_TYPE_OFF",
+}
+
+FOPS_MACROS: dict[str, str] = {
+    "owner": "FOPS_OWNER_OFF",
+    "llseek": "FOPS_LLSEEK_OFF",
+    "read": "FOPS_READ_OFF",
+    "write": "FOPS_WRITE_OFF",
+    "read_iter": "FOPS_READ_ITER_OFF",
+    "write_iter": "FOPS_WRITE_ITER_OFF",
+    "unlocked_ioctl": "FOPS_IOCTL_OFF",
+    "compat_ioctl": "FOPS_COMPAT_IOCTL_OFF",
+    "mmap": "FOPS_MMAP_OFF",
+    "open": "FOPS_OPEN_OFF",
+    "release": "FOPS_RELEASE_OFF",
+    "splice_read": "FOPS_SPLICE_READ_OFF",
+    "show_fdinfo": "FOPS_SHOW_FDINFO_OFF",
+}
+
+# best-effort groups: only applied when every member of the group is present
+BEST_EFFORT_GROUPS: list[tuple[str, str, dict[str, str]]] = [
+    ("workqueue_struct", "WQ_DFL_PWQ_OFF", {"dfl_pwq": "WQ_DFL_PWQ_OFF"}),
+    (
+        "pool_workqueue",
+        "PWQ_POOL_OFF",
+        {
+            "pool": "PWQ_POOL_OFF",
+            "wq": "PWQ_WQ_OFF",
+            "work_color": "PWQ_WORK_COLOR_OFF",
+            "refcnt": "PWQ_REFCNT_OFF",
+            "nr_in_flight": "PWQ_NR_IN_FLIGHT_OFF",
+            "nr_active": "PWQ_NR_ACTIVE_OFF",
+            "max_active": "PWQ_MAX_ACTIVE_OFF",
+        },
+    ),
+    ("worker_pool", "POOL_WORKLIST_OFF", {"worklist": "POOL_WORKLIST_OFF", "nr_idle": "POOL_NR_IDLE_OFF"}),
+]
+
+# configfs buffer offsets: derive from whichever struct actually carries
+# needs_read_fill/bin_buffer members (struct configfs_buffer on 6.1/6.6).
+CONFIGFS_BUFFER_MACROS: dict[str, str] = {
+    "page": "CFG_PAGE_OFF",
+    "needs_read_fill": "CFG_NEEDS_READ_FILL_OFF",
+    "bin_buffer": "CFG_BIN_BUFFER_OFF",
+    "bin_buffer_size": "CFG_BIN_BUFFER_SIZE_OFF",
+    "cb_max_size": "CFG_CB_MAX_SIZE_OFF",
+}
+
+
+def elf_load_base(path: Path) -> int | None:
+    """Recovered vmlinux base = lowest PT_LOAD p_vaddr (vmlinux-to-elf sets it)."""
+    try:
+        from elftools.elf.elffile import ELFFile  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        with path.open("rb") as fh:
+            elf = ELFFile(fh)
+            bases = [seg["p_vaddr"] for seg in elf.iter_segments() if seg["p_type"] == "PT_LOAD"]
+            return min(bases) if bases else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def replace_define(text: str, macro: str, value: str) -> str:
+    """Replace every '#define <macro> ...' logical line (handles backslash continuations)."""
+    out_lines: list[str] = []
+    lines = text.split("\n")
+    i = 0
+    replaced = False
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(rf"^(\s*#define\s+{re.escape(macro)}\s+)(.*)$", line)
+        if not m:
+            out_lines.append(line)
+            i += 1
+            continue
+        replaced = True
+        out_lines.append(m.group(1) + value)
+        # consume continuation lines: a line continues while the previous
+        # emitted line ended with a backslash
+        continues = m.group(2).rstrip().endswith("\\")
+        i += 1
+        while continues and i < len(lines):
+            continues = lines[i].rstrip().endswith("\\")
+            i += 1
+        continue
+    if not replaced:
+        raise ValueError(f"template target.h has no #define {macro}")
+    return "\n".join(out_lines)
+
+
+def add_define_before_endif(text: str, macro: str, value: str) -> str:
+    if re.search(rf"(?m)^\s*#define\s+{re.escape(macro)}\b", text):
+        return replace_define(text, macro, value)
+    lines = text.split("\n")
+    for idx in range(len(lines) - 1, -1, -1):
+        if re.match(r"^\s*#endif", lines[idx]):
+            lines.insert(idx, f"#define {macro} {value}")
+            return "\n".join(lines)
+    raise ValueError(f"cannot append {macro}: template target.h has no #endif")
+
+
+def set_define(text: str, macro: str, value: str) -> str:
+    """Replace the macro if the template has it, otherwise append it before #endif."""
+    if re.search(rf"(?m)^\s*#define\s+{re.escape(macro)}\b", text):
+        return replace_define(text, macro, value)
+    return add_define_before_endif(text, macro, value)
+
+
+def cmd_gen_target_h(args: argparse.Namespace) -> int:
+    text = args.template.read_text(encoding="utf-8", errors="replace")
+    report: list[str] = [f"# target.h derivation report for {args.profile}", ""]
+
+    def derived(label: str) -> None:
+        report.append(f"- [DERIVED] {label}")
+
+    def scaffolded(macro: str, reason: str) -> None:
+        report.append(f"- [SCAFFOLD] {macro} kept from template ({reason})")
+
+    # --- ELF base ---------------------------------------------------------
+    base: int | None = None
+    if args.elf_base:
+        base = parse_int(args.elf_base)
+    elif args.vmlinux_elf:
+        base = elf_load_base(args.vmlinux_elf)
+    if base is None:
+        base = parse_macro_int(text, "KIMAGE_TEXT_BASE")
+        if base is not None:
+            scaffolded("KIMAGE_TEXT_BASE", "no recovered ELF supplied; template value used")
+    else:
+        text = set_define(text, "KIMAGE_TEXT_BASE", f"0x{base:x}ULL")
+        derived(f"KIMAGE_TEXT_BASE = 0x{base:x} (recovered ELF PT_LOAD base)")
+
+    # --- firmware identity ------------------------------------------------
+    if args.fota_props and args.fota_props.exists():
+        props = json.loads(args.fota_props.read_text(encoding="utf-8"))
+        fingerprint = props.get("fingerprint")
+        if fingerprint:
+            text = set_define(text, "BUILD_FINGERPRINT", f'"{fingerprint}"')
+            derived(f"BUILD_FINGERPRINT = {fingerprint} (fota.zip ro.build.fingerprint)")
+        else:
+            scaffolded("BUILD_FINGERPRINT", "fota.zip had no ro.build.fingerprint")
+        if props.get("display_id"):
+            report.append(f"- [INFO] ro.build.display.id = {props['display_id']}")
+    else:
+        scaffolded("BUILD_FINGERPRINT", "no fota props supplied")
+
+    # Each variant label is a distinct string; replace by content, not by macro
+    # name (replace_define would clobber both branches with the same label).
+    for suffix in ("app-physical-p0-oracle", "root-umh"):
+        new_label = f'"{args.profile}-{suffix}"'
+        text, replaced = re.subn(rf'"[^"]*-{re.escape(suffix)}"', new_label, text, count=1)
+        if replaced:
+            derived(f"BUILD_VARIANT_LABEL ({suffix.split('-')[0]}) = {args.profile}-{suffix}")
+        else:
+            scaffolded(f"BUILD_VARIANT_LABEL {suffix}", "template does not use this label suffix")
+
+    p0_include = f'targets/{args.profile}/p0_fingerprint.h'
+    text = set_define(text, "P0_FINGERPRINT_HEADER", f'"{p0_include}"')
+    derived(f"P0_FINGERPRINT_HEADER = {p0_include}")
+
+    # --- symbol offsets from recovered vmlinux -----------------------------
+    nm: dict[str, int] = {}
+    if args.vmlinux_nm and args.vmlinux_nm.exists():
+        nm = parse_nm(args.vmlinux_nm)
+        if len(nm) < 1000:
+            report.append(f"- [WARN] vmlinux nm dump has only {len(nm)} symbols")
+    else:
+        report.append("- [WARN] no vmlinux nm dump supplied; symbol offsets are NOT derived")
+    if base is not None and nm:
+        for macro, symbol in SYMBOL_OFFSET_MACROS.items():
+            addr = nm.get(symbol)
+            if addr is None:
+                scaffolded(macro, f"symbol {symbol} not in recovered vmlinux")
+                continue
+            offset = addr - base
+            text = set_define(text, macro, f"0x{offset:x}ULL")
+            derived(f"{macro} = 0x{offset:x} (nm {symbol} - base)")
+        for macro, (symbol, struct_name, member) in COMPOSITE_SYMBOL_MACROS.items():
+            addr = nm.get(symbol)
+            member_off = struct_member_offset(args.struct_offsets, struct_name, member)
+            if addr is None or member_off is None:
+                scaffolded(macro, f"need nm[{symbol}] and BTF {struct_name}.{member}")
+                continue
+            offset = addr - base + member_off
+            text = set_define(text, macro, f"0x{offset:x}ULL")
+            derived(f"{macro} = 0x{offset:x} (nm {symbol} + BTF {struct_name}.{member})")
+
+    # --- struct offsets from raw BTF ---------------------------------------
+    if args.struct_offsets and args.struct_offsets.exists():
+        btf = json.loads(args.struct_offsets.read_text(encoding="utf-8"))
+        structs = btf.get("structs", {})
+        task = structs.get("task_struct", {}).get("members", {})
+        for member, macro in TASK_STRUCT_MACROS.items():
+            offset = task.get(member)
+            if offset is None:
+                scaffolded(macro, f"BTF task_struct.{member} missing")
+                continue
+            text = set_define(text, macro, f"0x{offset:x}ULL")
+            derived(f"{macro} = 0x{offset:x} (BTF task_struct.{member})")
+        work = structs.get("work_struct", {}).get("members", {})
+        for member, macro in WORK_STRUCT_MACROS.items():
+            offset = work.get(member)
+            if offset is None:
+                scaffolded(macro, f"BTF work_struct.{member} missing")
+                continue
+            text = set_define(text, macro, f"0x{offset:x}ULL")
+            derived(f"{macro} = 0x{offset:x} (BTF work_struct.{member})")
+        page = structs.get("page", {})
+        page_members = page.get("members", {})
+        for member, macro in PAGE_STRUCT_MACROS.items():
+            offset = page_members.get(member)
+            if offset is None:
+                scaffolded(macro, f"BTF page.{member} missing")
+                continue
+            text = set_define(text, macro, f"0x{offset:x}ULL")
+            derived(f"{macro} = 0x{offset:x} (BTF page.{member})")
+        if page.get("size"):
+            text = set_define(text, "STRUCT_PAGE_SIZE", f"0x{page['size']:x}")
+            derived(f"STRUCT_PAGE_SIZE = 0x{page['size']:x} (BTF sizeof(struct page))")
+        fops = structs.get("file_operations", {})
+        fops_members = fops.get("members", {})
+        for member, macro in FOPS_MACROS.items():
+            offset = fops_members.get(member)
+            if offset is None:
+                scaffolded(macro, f"BTF file_operations.{member} missing")
+                continue
+            text = set_define(text, macro, f"0x{offset:x}ULL")
+            derived(f"{macro} = 0x{offset:x} (BTF file_operations.{member})")
+        if fops.get("size"):
+            text = set_define(text, "SIZEOF_FILE_OPERATIONS", f"0x{fops['size']:x}")
+            derived(f"SIZEOF_FILE_OPERATIONS = 0x{fops['size']:x} (BTF sizeof(struct file_operations))")
+
+        # best-effort groups
+        for struct_name, first_macro, members in BEST_EFFORT_GROUPS:
+            s = structs.get(struct_name, {}).get("members", {})
+            if all(member in s for member in members):
+                for member, macro in members.items():
+                    text = set_define(text, macro, f"0x{s[member]:x}ULL")
+                    derived(f"{macro} = 0x{s[member]:x} (BTF {struct_name}.{member})")
+            else:
+                scaffolded(first_macro, f"BTF {struct_name} missing members")
+
+        cfg_candidates = [
+            (sname, s.get("members", {}))
+            for sname, s in structs.items()
+            if "needs_read_fill" in s.get("members", {}) and "bin_buffer" in s.get("members", {})
+        ]
+        if cfg_candidates:
+            sname, members = cfg_candidates[0]
+            if all(member in members for member in CONFIGFS_BUFFER_MACROS):
+                for member, macro in CONFIGFS_BUFFER_MACROS.items():
+                    text = set_define(text, macro, f"0x{members[member]:x}")
+                    derived(f"{macro} = 0x{members[member]:x} (BTF {sname}.{member})")
+            else:
+                scaffolded("CFG_PAGE_OFF", f"BTF {sname} missing configfs buffer members")
+        else:
+            scaffolded("CFG_PAGE_OFF", "no configfs buffer struct in BTF")
+    else:
+        scaffolded("FAKE_TASK_USAGE_OFF", "no BTF struct offsets supplied")
+        scaffolded("STRUCT_PAGE_SIZE", "no BTF struct offsets supplied")
+        scaffolded("SIZEOF_FILE_OPERATIONS", "no BTF struct offsets supplied")
+
+    # --- worker caller offset from objdump (best-effort) --------------------
+    if args.worker_objdump and args.worker_objdump.exists() and base is not None:
+        call_sites = find_worker_schedule_call_sites(args.worker_objdump.read_text(encoding="utf-8", errors="replace"))
+        if len(call_sites) == 1:
+            caller = call_sites[0] - base
+            text = set_define(text, "SLIDE_TRACEFS_WORKER_CALLER_OFF", f"0x{caller:x}ULL")
+            derived(f"SLIDE_TRACEFS_WORKER_CALLER_OFF = 0x{caller:x} (next instr after bl schedule in worker_thread)")
+        elif len(call_sites) > 1:
+            report.append(
+                f"- [WARN] {len(call_sites)} 'bl schedule' sites in worker_thread; "
+                "SLIDE_TRACEFS_WORKER_CALLER_OFF kept from template"
+            )
+        else:
+            scaffolded("SLIDE_TRACEFS_WORKER_CALLER_OFF", "no 'bl schedule' site found in worker_thread objdump")
+
+    args.target_dir.mkdir(parents=True, exist_ok=True)
+    out = args.target_dir / "target.h"
+    out.write_text(text, encoding="utf-8")
+    report_path = args.report or (args.target_dir / "port-report.md")
+    report_path.write_text("\n".join(report) + "\n", encoding="utf-8")
+    derived_count = sum(1 for line in report if line.startswith("- [DERIVED]"))
+    scaffold_count = sum(1 for line in report if line.startswith("- [SCAFFOLD]"))
+    print(f"wrote {out} (derived={derived_count}, scaffolded={scaffold_count})")
+    print(f"wrote {report_path}")
+    return 0
+
+
+def struct_member_offset(struct_offsets: Path | None, struct_name: str, member: str) -> int | None:
+    if not struct_offsets or not struct_offsets.exists():
+        return None
+    try:
+        data = json.loads(struct_offsets.read_text(encoding="utf-8"))
+        return data.get("structs", {}).get(struct_name, {}).get("members", {}).get(member)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def find_worker_schedule_call_sites(objdump: str) -> list[int]:
+    """Return absolute addresses of the instruction after every 'bl schedule' in worker_thread."""
+    sites: list[int] = []
+    lines = objdump.splitlines()
+    for idx, line in enumerate(lines):
+        if "\tbl\t" not in line and " bl " not in line:
+            continue
+        operand = line.split("\t", 2)[-1] if "\t" in line else line
+        if "schedule" not in operand:
+            continue
+        addr_match = re.match(r"\s*([0-9a-fA-F]+):", line)
+        if not addr_match or idx + 1 >= len(lines):
+            continue
+        next_line = lines[idx + 1]
+        next_addr = re.match(r"\s*([0-9a-fA-F]+):", next_line)
+        if not next_addr:
+            continue
+        sites.append(int(next_addr.group(1), 16))
+    return sites
+
+
 def cmd_gen_p0(args: argparse.Namespace) -> int:
     probe_offset = parse_int(args.probe_offset)
     image = args.kernel.read_bytes()
@@ -342,6 +979,9 @@ def cmd_scaffold_target(args: argparse.Namespace) -> int:
             src = backup
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+    if args.skip_target_header:
+        (dst / "target.h").unlink(missing_ok=True)
+        print("note: target.h not copied (--skip-target-header); run gen-target-h to derive it")
     if args.p0_header:
         shutil.copyfile(args.p0_header, dst / "p0_fingerprint.h")
     readme = dst / "README.md"
@@ -669,6 +1309,58 @@ def cmd_validate_analysis(args: argparse.Namespace) -> int:
                 errors.append("modinfo output missing vermagic")
             if args.kernel_release and args.kernel_release not in modinfo_text:
                 errors.append(f"modinfo vermagic does not contain kernel release {args.kernel_release}")
+
+    if args.struct_offsets:
+        if not args.struct_offsets.exists():
+            errors.append(f"missing struct offsets JSON: {args.struct_offsets}")
+        else:
+            try:
+                btf = json.loads(args.struct_offsets.read_text(encoding="utf-8"))
+                structs = btf.get("structs", {})
+            except (json.JSONDecodeError, OSError) as exc:
+                errors.append(f"struct offsets JSON unreadable: {exc}")
+                structs = {}
+            if structs:
+                task_members = structs.get("task_struct", {}).get("members", {})
+                for member, macro in (
+                    ("usage", "FAKE_TASK_USAGE_OFF"),
+                    ("prio", "FAKE_TASK_PRIO_OFF"),
+                    ("normal_prio", "FAKE_TASK_NORMAL_PRIO_OFF"),
+                    ("sched_task_group", "FAKE_TASK_TASK_GROUP_OFF"),
+                    ("pi_lock", "FAKE_TASK_PI_LOCK_OFF"),
+                    ("pi_waiters", "FAKE_TASK_PI_WAITERS_OFF"),
+                    ("pi_top_task", "FAKE_TASK_PI_TOP_TASK_OFF"),
+                    ("pi_blocked_on", "FAKE_TASK_PI_BLOCKED_ON_OFF"),
+                ):
+                    if member in task_members:
+                        expected = parse_macro_int(target_text, macro)
+                        if expected is None:
+                            errors.append(f"target.h missing numeric {macro}")
+                        elif expected != task_members[member]:
+                            errors.append(
+                                f"{macro} mismatch: target.h=0x{expected:x} BTF task_struct.{member}=0x{task_members[member]:x}"
+                            )
+                for member, macro in (
+                    ("unlocked_ioctl", "FOPS_IOCTL_OFF"),
+                    ("compat_ioctl", "FOPS_COMPAT_IOCTL_OFF"),
+                    ("show_fdinfo", "FOPS_SHOW_FDINFO_OFF"),
+                    ("splice_read", "FOPS_SPLICE_READ_OFF"),
+                ):
+                    fops_members = structs.get("file_operations", {}).get("members", {})
+                    if member in fops_members:
+                        expected = parse_macro_int(target_text, macro)
+                        if expected is not None and expected != fops_members[member]:
+                            errors.append(
+                                f"{macro} mismatch: target.h=0x{expected:x} BTF file_operations.{member}=0x{fops_members[member]:x}"
+                            )
+                page_members = structs.get("page", {}).get("members", {})
+                if "compound_head" in page_members:
+                    expected = parse_macro_int(target_text, "STRUCT_PAGE_COMPOUND_HEAD_OFF")
+                    if expected is not None and expected != page_members["compound_head"]:
+                        errors.append(
+                            f"STRUCT_PAGE_COMPOUND_HEAD_OFF mismatch: target.h=0x{expected:x} "
+                            f"BTF page.compound_head=0x{page_members['compound_head']:x}"
+                        )
 
     for label, path in (
         ("check_symbol", args.check_symbol_log),

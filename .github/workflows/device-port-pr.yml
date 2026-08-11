@@ -586,9 +586,12 @@ jobs:
                   support/targets-v3.json \
                   docs
           if ls kernelsu/ksud-${{ inputs.profile }}-kdp >/dev/null 2>&1; then
-            git add "kernelsu/ksud-${{ inputs.profile }}-kdp" \
-                    "kernelsu/*_kernelsu-${{ inputs.profile }}-kdp.ko"
+            git add "kernelsu/ksud-${{ inputs.profile }}-kdp"
           fi
+          # KO names differ per target (android14-6.1_kernelsu-<profile>-kdp.ko vs
+          # android13-5.15.189_kernelsu-<profile>.ko); tolerate either pattern
+          git add kernelsu/*_kernelsu-${{ inputs.profile }}-kdp.ko 2>/dev/null || true
+          git add kernelsu/*_kernelsu-${{ inputs.profile }}.ko 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No payload changes after validation; skipping PR creation."
             exit 0

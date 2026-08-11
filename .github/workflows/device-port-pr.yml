@@ -77,15 +77,10 @@ on:
       kernelsu_artifact:
         description: existing KernelSU path in payload repo for reuse mode, for example kernelsu/ksud-A366WVLS3AYG1-kdp
         required: true
-      kernelsu_ddk_image:
-        description: DDK container image for kernelsu_build=ddk, for example ghcr.io/ylarod/ddk-min:android14-6.1-20260313
+      kernelsu_ddk_json:
+        description: 'JSON for kernelsu_build=ddk: image (DDK container), release (target vermagic release), kmi_asset (embedded KO name), for example {"image":"ghcr.io/ylarod/ddk-min:android14-6.1-20260313","kmi_asset":"android14-6.1_kernelsu.ko"}'
         required: false
-      kernelsu_release:
-        description: exact target release for the DDK module vermagic; defaults to the auto-detected kernel release
-        required: false
-      kernelsu_kmi_asset:
-        description: ksud embedded-KO asset name for kernelsu_build=ddk, for example android14-6.1_kernelsu.ko
-        required: false
+        default: "{}"
       kernelsu_options_json:
         description: optional JSON for KO/build/audit paths and KernelSU source build settings
         required: false
@@ -299,14 +294,14 @@ jobs:
         env:
           KERNELSU_BUILD_MODE: ${{ inputs.kernelsu_build }}
           KERNELSU_OPTIONS_JSON: ${{ inputs.kernelsu_options_json }}
-          KERNELSU_DDK_IMAGE: ${{ inputs.kernelsu_ddk_image }}
-          KERNELSU_RELEASE_INPUT: ${{ inputs.kernelsu_release }}
-          KERNELSU_KMI_ASSET: ${{ inputs.kernelsu_kmi_asset }}
+          KERNELSU_DDK_JSON: ${{ inputs.kernelsu_ddk_json }}
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           set -euo pipefail
           python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_OPTIONS_JSON") or "{}"); keys=("source_repo","source_ref","patch_path","build_command","built_ko_path","manual_relocation"); print("\n".join(f"KERNELSU_{k.upper()}={shlex.quote(str(opts.get(k, \"\")))}" for k in keys))' > ".work/kernelsu-options.env"
           . ".work/kernelsu-options.env"
+          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_DDK_JSON") or "{}"); keys=("image","release","kmi_asset"); print("\n".join(f"KERNELSU_DDK_{k.upper()}={shlex.quote(str(opts.get(k, \"\")))}" for k in keys))' > ".work/kernelsu-ddk.env"
+          . ".work/kernelsu-ddk.env"
           profile="${{ inputs.profile }}"
           w=".work/$profile"
           echo "${{ inputs.kernelsu_artifact }}" > ".work/kernelsu-artifact-path.txt"
@@ -318,18 +313,18 @@ jobs:
 
           if [ "$KERNELSU_BUILD_MODE" = "ddk" ]; then
             if [ -z "$KERNELSU_DDK_IMAGE" ]; then
-              echo "kernelsu_build=ddk requires kernelsu_ddk_image (for example ghcr.io/ylarod/ddk-min:android14-6.1-20260313)." >&2
+              echo "kernelsu_build=ddk requires kernelsu_ddk_json.image (for example ghcr.io/ylarod/ddk-min:android14-6.1-20260313)." >&2
               exit 1
             fi
-            release="${KERNELSU_RELEASE_INPUT:-}"
+            release="${KERNELSU_DDK_RELEASE:-}"
             if [ -z "$release" ] && [ -f "$w/kernel-release.txt" ]; then
               release="$(cat "$w/kernel-release.txt")"
             fi
             if [ -z "$release" ]; then
-              echo "kernelsu_build=ddk needs kernelsu_release or an auto-detected kernel release." >&2
+              echo "kernelsu_build=ddk needs kernelsu_ddk_json.release or an auto-detected kernel release." >&2
               exit 1
             fi
-            kmi_asset="${KERNELSU_KMI_ASSET:-android15-6.6_kernelsu.ko}"
+            kmi_asset="${KERNELSU_DDK_KMI_ASSET:-android15-6.6_kernelsu.ko}"
             echo "Building KernelSU module for release: $release (kmi asset: $kmi_asset)"
             git clone --depth 1 --branch v3.2.5 https://github.com/tiann/KernelSU.git ".work/kernelsu-src"
             git -C ".work/kernelsu-src" apply ../payloads/kernelsu/patches/KernelSU-v3.2.5-samsung-kdp-rkp-defex.patch

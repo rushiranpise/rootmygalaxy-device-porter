@@ -1359,8 +1359,13 @@ def find_payload_span(text: str, payload_id: str) -> tuple[int, int, dict] | Non
             return None
         if obj.get("payloadId") == payload_id:
             # stop at the object close: the trailing comma (if any) stays in
-            # original[end:] so a span replacement keeps it
-            return idx, end, obj
+            # original[end:] so a span replacement keeps it. Back the start up
+            # to the beginning of the line so the serializer's own indent is
+            # not stacked on top of the file's existing indentation.
+            start = idx
+            while start > 0 and text[start - 1] in " \t":
+                start -= 1
+            return start, end, obj
         idx = end
         while idx < len(text) and text[idx] in " \t\r\n,":
             idx += 1

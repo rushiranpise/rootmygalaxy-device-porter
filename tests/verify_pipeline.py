@@ -199,6 +199,17 @@ def main() -> None:
         feed_data = json.loads((payloads / "support" / "targets-v3.json").read_text(encoding="utf-8"))
         s25 = [p for p in feed_data["payloads"] if p["payloadId"] == "galaxy-s25-series-2026-06-07"]
         assert len(s25) == 1 and s25[0]["displayName"] == "Renamed S25 | Kernel 6.6.98", s25
+        # a replaced entry must keep the file's existing object-brace indent
+        # (4 spaces), not stack the serializer's own indent on top of it
+        feed_lines = (payloads / "support" / "targets-v3.json").read_text(encoding="utf-8").splitlines()
+        for i, ln in enumerate(feed_lines):
+            if '"payloadId": "galaxy-s25-series-2026-06-07"' in ln:
+                brace = feed_lines[i - 1].strip()
+                assert brace == "{", feed_lines[i - 1]
+                assert feed_lines[i - 1].startswith("    {"), repr(feed_lines[i - 1])
+                break
+        else:
+            raise AssertionError("replaced s25 entry not found")
         print("PASS add-feed-entry replace: middle entry updated in place, feed stays valid JSON")
         run(["validate-feed", "--payloads-repo", str(payloads)], cwd=REPO)
         run(["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,

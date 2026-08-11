@@ -167,8 +167,9 @@ def main() -> None:
         assert f"targets/{PROFILE}/p0_fingerprint.h" in header
         report = (payloads / "src" / "targets" / PROFILE / "port-report.md").read_text(encoding="utf-8")
         derived = sum(1 for l in report.splitlines() if l.startswith("- [DERIVED]"))
-        assert derived >= 50, f"only {derived} derived entries"
-        print(f"PASS scaffold+derive: target.h written with {derived} derived macros")
+        kept = sum(1 for l in report.splitlines() if "already correct in template; kept as-is" in l)
+        assert derived + kept >= 50, f"only {derived} derived + {kept} value-matched entries"
+        print(f"PASS scaffold+derive: target.h written with {derived} derived + {kept} value-matched macros")
 
         # 3. fake artifacts + feed entry + validation gates
         (payloads / "artifacts" / PROFILE).mkdir(parents=True)

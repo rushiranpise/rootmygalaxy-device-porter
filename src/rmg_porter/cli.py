@@ -593,6 +593,14 @@ MACRO_NAME_EQUIVALENTS: dict[str, tuple[str, ...]] = {
     "SLIDE_NFULNL_LOGGER_NAME_OFF": ("SLIDE_NFULNL_LOGGER_OFF",),
     "SLIDE_NFULNL_LOGGER_OBJECT_OFF": ("SLIDE_LOGGERS_0_1_OFF",),
     "SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF": ("SLIDE_RANDOM_BOOT_ID_DATA_OFF",),
+    "FAKE_TASK_USAGE_OFF": ("TASK_USAGE_OFF",),
+    "FAKE_TASK_PRIO_OFF": ("TASK_PRIO_OFF",),
+    "FAKE_TASK_NORMAL_PRIO_OFF": ("TASK_NORMAL_PRIO_OFF",),
+    "FAKE_TASK_TASK_GROUP_OFF": ("TASK_SCHED_TASK_GROUP_OFF", "TASK_TASK_GROUP_OFF"),
+    "FAKE_TASK_PI_LOCK_OFF": ("TASK_PI_LOCK_OFF",),
+    "FAKE_TASK_PI_WAITERS_OFF": ("TASK_PI_WAITERS_OFF",),
+    "FAKE_TASK_PI_TOP_TASK_OFF": ("TASK_PI_TOP_TASK_OFF",),
+    "FAKE_TASK_PI_BLOCKED_ON_OFF": ("TASK_PI_BLOCKED_ON_OFF",),
 }
 
 
@@ -604,6 +612,61 @@ def template_has_equivalent(text: str, macro: str) -> str | None:
         if re.search(rf"(?m)^\s*#define\s+{re.escape(equiv)}\b", text):
             return equiv
     return None
+
+
+_CONST_RE = re.compile(r"0[xX][0-9a-fA-F]+|\d+")
+
+
+def _eval_macro_rhs(text: str, rhs: str, _depth: int = 0) -> int | None:
+    """Evaluate a #define right-hand side: a hex/decimal literal, a bare
+    macro alias, or a simple (MACRO +/- const) expression. Returns None when
+    the form is not understood (the caller then rewrites the definition)."""
+    if _depth > 8:
+        return None
+    rhs = rhs.strip()
+    if not rhs:
+        return None
+    # strip a C integer suffix and any trailing backslash
+    rhs = re.sub(r"(ULL|ULLL|LL|L)$", "", rhs.strip().rstrip("\\"))
+    const_pat = r"(0[xX][0-9a-fA-F]+|\d+)(?:ULL|LL|L)?"
+    # (MACRO +/- const) and MACRO +/- const
+    m = re.match(rf"^\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*([+-])\s*{const_pat}\s*\)?$", rhs)
+    if m:
+        name, op, const = m.group(1), m.group(2), m.group(3)
+        base = _eval_macro_rhs(text, name, _depth + 1)
+        if base is None:
+            return None
+        cval = int(const, 16) if const.lower().startswith("0x") else int(const)
+        return base + cval if op == "+" else base - cval
+    # const +/- MACRO (rare)
+    m = re.match(rf"^\(?\s*{const_pat}\s*([+-])\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)?$", rhs)
+    if m:
+        const, op, name = m.group(1), m.group(2), m.group(3)
+        base = _eval_macro_rhs(text, name, _depth + 1)
+        if base is None:
+            return None
+        cval = int(const, 16) if const.lower().startswith("0x") else int(const)
+        return cval + base if op == "+" else cval - base
+    # bare macro alias
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", rhs):
+        m = re.search(rf"(?m)^\s*#define\s+{re.escape(rhs)}\s+([^\n\\]+)", text)
+        if m:
+            return _eval_macro_rhs(text, m.group(1), _depth + 1)
+        return None
+    # plain literal
+    if re.match(rf"^({_CONST_RE.pattern})$", rhs):
+        return int(rhs, 16) if rhs.lower().startswith("0x") else int(rhs)
+    return None
+
+
+def macro_value_matches(text: str, macro: str, value: int) -> bool:
+    """True when the template already defines `macro` with numeric value
+    `value` (as a literal, alias, or simple expression). The definition is
+    then left byte-identical instead of being flattened."""
+    m = re.search(rf"(?m)^\s*#define\s+{re.escape(macro)}\s+([^\n\\]+)", text)
+    if not m:
+        return False
+    return _eval_macro_rhs(text, m.group(1)) == value
 
 
 def resolve_symbol(nm: dict[str, int], macro: str, symbol: str) -> tuple[str, int] | None:
@@ -831,6 +894,29 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
     def scaffolded(macro: str, reason: str) -> None:
         report.append(f"- [SCAFFOLD] {macro} kept from template ({reason})")
 
+    def set_derived(macro: str, value: int, source: str) -> None:
+        """Write a derived value unless the template already carries it.
+
+        Two "already correct" cases are left byte-identical so re-derivation
+        of an existing header produces no spurious diff: (1) the value lives
+        under a legacy macro name, (2) the macro itself is defined as a
+        literal, alias, or simple expression with the same numeric value
+        (a36xq-style headers).
+        """
+        nonlocal text
+        equiv = template_has_equivalent(text, macro)
+        if equiv is not None:
+            report.append(
+                f"- [INFO] {macro} = 0x{value:x} ({source}) "
+                f"not emitted: template defines equivalent {equiv}"
+            )
+            return
+        if macro_value_matches(text, macro, value):
+            report.append(f"- [INFO] {macro} = 0x{value:x} ({source}) already correct in template; kept as-is")
+            return
+        text = set_define_num(text, macro, value)
+        derived(f"{macro} = 0x{value:x} ({source})")
+
     # --- ELF base ---------------------------------------------------------
     base: int | None = None
     if args.elf_base:
@@ -900,15 +986,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
                 continue
             found_symbol, addr = resolved
             offset = addr - base
-            equiv = template_has_equivalent(text, macro)
-            if equiv is not None:
-                report.append(
-                    f"- [INFO] {macro} = 0x{offset:x} (nm {found_symbol} - base) "
-                    f"not emitted: template defines equivalent {equiv}"
-                )
-                continue
-            text = set_define_num(text, macro, offset)
-            derived(f"{macro} = 0x{offset:x} (nm {found_symbol} - base)")
+            set_derived(macro, offset, f"nm {found_symbol} - base")
         for macro, (symbol, struct_name, member) in COMPOSITE_SYMBOL_MACROS.items():
             addr = nm.get(symbol)
             member_off = struct_member_offset(args.struct_offsets, struct_name, member)
@@ -916,15 +994,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
                 scaffolded(macro, f"need nm[{symbol}] and BTF {struct_name}.{member}")
                 continue
             offset = addr - base + member_off
-            equiv = template_has_equivalent(text, macro)
-            if equiv is not None:
-                report.append(
-                    f"- [INFO] {macro} = 0x{offset:x} (nm {symbol} + BTF {struct_name}.{member}) "
-                    f"not emitted: template defines equivalent {equiv}"
-                )
-                continue
-            text = set_define_num(text, macro, offset)
-            derived(f"{macro} = 0x{offset:x} (nm {symbol} + BTF {struct_name}.{member})")
+            set_derived(macro, offset, f"nm {symbol} + BTF {struct_name}.{member}")
 
     # --- struct offsets from raw BTF ---------------------------------------
     if args.struct_offsets and args.struct_offsets.exists():
@@ -936,16 +1006,14 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             if offset is None:
                 scaffolded(macro, f"BTF task_struct.{member} missing")
                 continue
-            text = set_define_num(text, macro, offset)
-            derived(f"{macro} = 0x{offset:x} (BTF task_struct.{member})")
+            set_derived(macro, offset, f"BTF task_struct.{member}")
         work = structs.get("work_struct", {}).get("members", {})
         for member, macro in WORK_STRUCT_MACROS.items():
             offset = work.get(member)
             if offset is None:
                 scaffolded(macro, f"BTF work_struct.{member} missing")
                 continue
-            text = set_define_num(text, macro, offset)
-            derived(f"{macro} = 0x{offset:x} (BTF work_struct.{member})")
+            set_derived(macro, offset, f"BTF work_struct.{member}")
         page = structs.get("page", {})
         page_members = page.get("members", {})
         for member, macro in PAGE_STRUCT_MACROS.items():
@@ -953,11 +1021,9 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             if offset is None:
                 scaffolded(macro, f"BTF page.{member} missing")
                 continue
-            text = set_define_num(text, macro, offset)
-            derived(f"{macro} = 0x{offset:x} (BTF page.{member})")
+            set_derived(macro, offset, f"BTF page.{member}")
         if page.get("size"):
-            text = set_define_num(text, "STRUCT_PAGE_SIZE", page['size'])
-            derived(f"STRUCT_PAGE_SIZE = 0x{page['size']:x} (BTF sizeof(struct page))")
+            set_derived("STRUCT_PAGE_SIZE", page['size'], "BTF sizeof(struct page)")
         fops = structs.get("file_operations", {})
         fops_members = fops.get("members", {})
         for member, macro in FOPS_MACROS.items():
@@ -965,11 +1031,9 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             if offset is None:
                 scaffolded(macro, f"BTF file_operations.{member} missing")
                 continue
-            text = set_define_num(text, macro, offset)
-            derived(f"{macro} = 0x{offset:x} (BTF file_operations.{member})")
+            set_derived(macro, offset, f"BTF file_operations.{member}")
         if fops.get("size") and re.search(rf"(?m)^\s*#define\s+SIZEOF_FILE_OPERATIONS\b", text):
-            text = set_define_num(text, "SIZEOF_FILE_OPERATIONS", fops['size'])
-            derived(f"SIZEOF_FILE_OPERATIONS = 0x{fops['size']:x} (BTF sizeof(struct file_operations))")
+            set_derived("SIZEOF_FILE_OPERATIONS", fops['size'], "BTF sizeof(struct file_operations)")
         elif fops.get("size"):
             report.append(
                 "- [INFO] SIZEOF_FILE_OPERATIONS not emitted: template does not define it, "
@@ -981,8 +1045,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             s = structs.get(struct_name, {}).get("members", {})
             if all(member in s for member in members):
                 for member, macro in members.items():
-                    text = set_define_num(text, macro, s[member])
-                    derived(f"{macro} = 0x{s[member]:x} (BTF {struct_name}.{member})")
+                    set_derived(macro, s[member], f"BTF {struct_name}.{member}")
             else:
                 scaffolded(first_macro, f"BTF {struct_name} missing members")
 
@@ -995,8 +1058,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             sname, members = cfg_candidates[0]
             if all(member in members for member in CONFIGFS_BUFFER_MACROS):
                 for member, macro in CONFIGFS_BUFFER_MACROS.items():
-                    text = set_define_num(text, macro, members[member])
-                    derived(f"{macro} = 0x{members[member]:x} (BTF {sname}.{member})")
+                    set_derived(macro, members[member], f"BTF {sname}.{member}")
             else:
                 scaffolded("CFG_PAGE_OFF", f"BTF {sname} missing configfs buffer members")
         else:
@@ -1011,8 +1073,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
         call_sites = find_worker_schedule_call_sites(args.worker_objdump.read_text(encoding="utf-8", errors="replace"))
         if len(call_sites) == 1:
             caller = call_sites[0] - base
-            text = set_define_num(text, "SLIDE_TRACEFS_WORKER_CALLER_OFF", caller)
-            derived(f"SLIDE_TRACEFS_WORKER_CALLER_OFF = 0x{caller:x} (next instr after bl schedule in worker_thread)")
+            set_derived("SLIDE_TRACEFS_WORKER_CALLER_OFF", caller, "next instr after bl schedule in worker_thread")
         elif len(call_sites) > 1:
             report.append(
                 f"- [WARN] {len(call_sites)} 'bl schedule' sites in worker_thread; "

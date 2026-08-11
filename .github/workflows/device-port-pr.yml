@@ -93,6 +93,10 @@ on:
         description: build and validate, but do not open a PR
         required: true
         default: "false"
+      allow_build_mismatch:
+        description: allow the firmware AP build to differ from the profile name (re-porting when the exact committed build is retired from FUS)
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -512,7 +516,8 @@ jobs:
             --kernel "$w/kernel" \
             --kernelsu-path "../payloads/$ksud_path" \
             $ko_arg \
-            $btf_arg
+            $btf_arg \
+            $([[ "${{ inputs.allow_build_mismatch }}" = "true" ]] && echo "--allow-profile-build-mismatch")
           analysis_args=""
           if [ -f "$w/struct-offsets.json" ]; then
             analysis_args="$analysis_args --struct-offsets $w/struct-offsets.json"

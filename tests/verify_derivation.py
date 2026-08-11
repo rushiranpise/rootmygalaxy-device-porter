@@ -445,6 +445,48 @@ def main() -> None:
         assert "not emitted: template defines equivalent SLIDE_LOGGERS_0_1_OFF" in legacy_report, legacy_report
         print("PASS legacy equivalents: new-style slide macros not appended when legacy names carry the value")
 
+        # --- 3i. alias/expression style preservation (a36xq-style) ------------
+        # The A36 committed header defines FAKE_TASK_* as aliases of TASK_* and
+        # ASHMEM_MISC_FOPS_OFF as (ASHMEM_MISC_OFF + 0x10ULL). A faithful
+        # re-derivation must leave those lines byte-identical (same numeric
+        # value), not flatten them to literals.
+        alias_template = work / "target-alias-style.h"
+        alias_text = TEMPLATE.read_text(encoding="utf-8")
+        alias_text = alias_text.replace(
+            "#define FAKE_TASK_USAGE_OFF 0x40",
+            "#define TASK_USAGE_OFF 0x40\n#define FAKE_TASK_USAGE_OFF TASK_USAGE_OFF",
+        )
+        alias_text = alias_text.replace(
+            "#define FAKE_TASK_PI_LOCK_OFF 0x924",
+            "#define TASK_PI_LOCK_OFF 0x924\n#define FAKE_TASK_PI_LOCK_OFF TASK_PI_LOCK_OFF",
+        )
+        alias_text = alias_text.replace(
+            "#define ASHMEM_MISC_FOPS_OFF 0x02484970ULL",
+            "#define ASHMEM_MISC_OFF 0x02484960ULL\n#define ASHMEM_MISC_FOPS_OFF (ASHMEM_MISC_OFF + 0x10ULL)",
+        )
+        alias_template.write_text(alias_text, encoding="utf-8")
+        alias_style_dir = work / "target-alias-style"
+        alias_style_dir.mkdir()
+        run_cli(
+            [
+                "gen-target-h",
+                "--target-dir", str(alias_style_dir),
+                "--template", str(alias_template),
+                "--profile", "a36xq-A366WVLS3AYG1",
+                "--elf-base", hex(KIMAGE_TEXT_BASE),
+                "--vmlinux-nm", str(nm_path),
+                "--struct-offsets", str(so_path),
+            ],
+            cwd=REPO,
+        )
+        alias_hdr = (alias_style_dir / "target.h").read_text(encoding="utf-8")
+        assert "#define FAKE_TASK_USAGE_OFF TASK_USAGE_OFF" in alias_hdr, "alias flattened"
+        assert "#define FAKE_TASK_PI_LOCK_OFF TASK_PI_LOCK_OFF" in alias_hdr, "alias flattened"
+        assert "#define ASHMEM_MISC_FOPS_OFF (ASHMEM_MISC_OFF + 0x10ULL)" in alias_hdr, "expression flattened"
+        alias_style_report = (alias_style_dir / "port-report.md").read_text(encoding="utf-8")
+        assert "already correct in template; kept as-is" in alias_style_report, alias_style_report
+        print("PASS alias-style: FAKE_TASK_* aliases and ASHMEM_MISC_FOPS_OFF expression kept byte-identical")
+
         # --- 3b. missing-inputs fallback ---------------------------------------
         fallback_dir = work / "target-fallback"
         fallback_dir.mkdir()

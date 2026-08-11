@@ -493,8 +493,8 @@ def parse_btf(data: bytes) -> tuple[bytes, list[BTFStruct]]:
             cursor += 12
         elif kind == 6:  # ENUM
             cursor += vlen * 8
-        elif kind == 13:  # FUNC_PROTO
-            cursor += vlen * 4
+        elif kind == 13:  # FUNC_PROTO: vlen x btf_param { name_off, type } = 8 bytes each
+            cursor += vlen * 8
         elif kind == 14:  # VAR
             cursor += 4
         elif kind == 15:  # DATASEC

@@ -123,6 +123,25 @@ def build_btf_blob() -> bytes:
         type_bytes += struct.pack("<III", name_off, info, SIZES[sname])
         for mname, off in members:
             type_bytes += struct.pack("<III", intern(mname), 0, off << 3)
+    # extra kinds so the type walker exercises every payload branch:
+    # INT (1) with encoding
+    type_bytes += struct.pack("<IIII", intern("int"), (1 << 24) | 0, 4, 0x1000000)
+    # ARRAY (3)
+    type_bytes += struct.pack("<IIIIII", intern("int_arr"), (3 << 24) | 0, 0, 0, 0, 8)
+    # FUNC_PROTO (13) with 3 params -> 8 bytes each; a wrong walker uses 4 and drifts
+    type_bytes += struct.pack(
+        "<IIIIIIIII",
+        intern("func_proto"), (13 << 24) | 3, 0,
+        intern("a"), 0, intern("b"), 0, intern("c"), 0,
+    )
+    # ENUM64 (19) with 1 entry (12 bytes)
+    type_bytes += struct.pack("<IIIIII", intern("enum64"), (19 << 24) | 1, 8, intern("E64_A"), 1, 0)
+    # VAR (14)
+    type_bytes += struct.pack("<IIII", intern("my_var"), (14 << 24) | 0, 0, 1)
+    # DATASEC (15) with 1 entry (12 bytes)
+    type_bytes += struct.pack("<IIIIII", intern(".data"), (15 << 24) | 1, 0, 0, 0, 0)
+    # DECL_TAG (17)
+    type_bytes += struct.pack("<IIII", intern("__user"), (17 << 24) | 0, 0, 0)
     str_bytes = b"".join(strings)
     hdr_len = 24
     type_off = 0

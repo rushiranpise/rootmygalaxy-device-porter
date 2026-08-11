@@ -595,6 +595,9 @@ jobs:
           fi
           git commit -m "Add ${{ inputs.profile }} payload profile"
           git remote set-url origin "https://x-access-token:${PAYLOADS_PR_TOKEN}@github.com/${{ inputs.payloads_repo }}.git"
+          # the branch may already exist from an earlier run (e.g. a closed PR);
+          # fetch it so the force-with-lease lease is valid, then force over it
+          git fetch origin "$branch" 2>/dev/null || true
           git push --force-with-lease origin "$branch"
           gh pr create \
             --repo "${{ inputs.payloads_repo }}" \

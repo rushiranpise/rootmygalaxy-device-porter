@@ -314,11 +314,16 @@ def main() -> None:
         # the template does not define SIZEOF_FILE_OPERATIONS, so it must not be
         # appended (FOPS_SHOW_FDINFO_OFF satisfies the size gate)
         assert "#define SIZEOF_FILE_OPERATIONS" not in derived_header
+        # multi-line template defines keep their backslash layout; match the
+        # value with \s+ so the continuation is transparent
         for macro, value in [
-            ("BUILD_FINGERPRINT", '"samsung/r12sksx/essi:16/BP4A.251205.006/S721NKSSCDZF3:user/release-keys"'),
-            ("P0_FINGERPRINT_HEADER", '"targets/essi-S721NKSSCDZF3/p0_fingerprint.h"'),
+            ("BUILD_FINGERPRINT", "samsung/r12sksx/essi:16/BP4A.251205.006/S721NKSSCDZF3:user/release-keys"),
+            ("P0_FINGERPRINT_HEADER", "targets/essi-S721NKSSCDZF3/p0_fingerprint.h"),
         ]:
-            assert f"#define {macro} {value}" in derived_header, f"{macro}: expected {value}"
+            # [\s\\]* crosses a possible backslash continuation + newline
+            assert re.search(
+                rf"#define\s+{re.escape(macro)}\s+[\s\\]*\"{re.escape(value)}\"", derived_header
+            ), f"{macro}: expected {value}"
         # scaffolded macros untouched
         assert "#define SLIDE_TRACEFS_EVENT_ID 106" in derived_header
         assert "#define P0_KERNEL_PHYS_LOAD 0x80000000ULL" in derived_header
@@ -353,6 +358,31 @@ def main() -> None:
         got_p0 = p0_out.read_text(encoding="utf-8")
         assert got_p0 == expected_p0, "gen-p0 output does not byte-match the committed pa3q p0_fingerprint.h"
         print("PASS gen-p0: byte-identical to committed pa3q-S938NKSUACZF1/p0_fingerprint.h")
+
+        # --- 3f. splice symbol alias on newer kernels ---------------------------
+        # 6.6+ renamed generic_file_splice_read to copy_splice_read; derivation
+        # must fall back to the alias and produce the same offset as the template.
+        nm_alias = nm_path.read_text(encoding="utf-8").replace("generic_file_splice_read", "copy_splice_read")
+        alias_path = work / "vmlinux-alias.nm"
+        alias_path.write_text(nm_alias, encoding="utf-8")
+        alias_dir = work / "target-alias"
+        alias_dir.mkdir()
+        run_cli(
+            [
+                "gen-target-h",
+                "--target-dir", str(alias_dir),
+                "--template", str(TEMPLATE),
+                "--profile", "essi-S721NKSSCDZF3",
+                "--elf-base", hex(KIMAGE_TEXT_BASE),
+                "--vmlinux-nm", str(alias_path),
+            ],
+            cwd=REPO,
+        )
+        alias_hdr = (alias_dir / "target.h").read_text(encoding="utf-8")
+        assert "#define COPY_SPLICE_READ_OFF 0x003ef02cULL" in alias_hdr, "copy_splice_read alias not resolved"
+        alias_report = (alias_dir / "port-report.md").read_text(encoding="utf-8")
+        assert "nm copy_splice_read - base" in alias_report, alias_report
+        print("PASS splice alias: COPY_SPLICE_READ_OFF derived via copy_splice_read fallback")
 
         # --- 3b. missing-inputs fallback ---------------------------------------
         fallback_dir = work / "target-fallback"

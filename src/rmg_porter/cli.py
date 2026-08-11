@@ -565,6 +565,24 @@ SYMBOL_OFFSET_MACROS: dict[str, str] = {
     "SLIDE_SYSCTL_BOOTID_OFF": "sysctl_bootid",
 }
 
+# Newer kernels renamed the splice read handler: on 6.6+ the fops->splice_read
+# implementation is copy_splice_read (filemap_splice_read is a separate path).
+# When the primary symbol is absent, fall back in order so derived values match
+# the upstream per-kernel convention (generic on 6.1, copy on 6.6+).
+SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "COPY_SPLICE_READ_OFF": ("copy_splice_read", "filemap_splice_read"),
+}
+
+
+def resolve_symbol(nm: dict[str, int], macro: str, symbol: str) -> tuple[str, int] | None:
+    """Return (found_symbol, address) for a macro's symbol, trying aliases."""
+    for candidate in (symbol,) + SYMBOL_ALIASES.get(macro, ()):
+        addr = nm.get(candidate)
+        if addr is not None:
+            return candidate, addr
+    return None
+
+
 # composite offsets: symbol plus a BTF member offset within that object
 COMPOSITE_SYMBOL_MACROS: dict[str, tuple[str, str, str]] = {
     # macro -> (symbol, struct, member); offset = nm[symbol] - base + member
@@ -699,14 +717,23 @@ def replace_define(text: str, macro: str, value: str) -> str:
             i += 1
             continue
         replaced = True
-        out_lines.append(m.group(1) + value)
         # consume continuation lines: a line continues while the previous
         # emitted line ended with a backslash
+        cont_lines: list[str] = []
         continues = m.group(2).rstrip().endswith("\\")
         i += 1
         while continues and i < len(lines):
+            cont_lines.append(lines[i])
             continues = lines[i].rstrip().endswith("\\")
             i += 1
+        if cont_lines:
+            # keep the multi-line backslash layout so a re-derivation of an
+            # existing header stays byte-compatible with the committed file
+            indent = re.match(r"^(\s*)", cont_lines[0]).group(1) or "  "
+            out_lines.append(m.group(1).rstrip() + " \\")
+            out_lines.append(indent + value)
+        else:
+            out_lines.append(m.group(1) + value)
         continue
     if not replaced:
         raise ValueError(f"template target.h has no #define {macro}")
@@ -762,6 +789,8 @@ def set_define_num(text: str, macro: str, value: int) -> str:
 
 def cmd_gen_target_h(args: argparse.Namespace) -> int:
     text = args.template.read_text(encoding="utf-8", errors="replace")
+    # read_text normalizes line endings, so detect EOL from the raw bytes
+    template_crlf = b"\r\n" in args.template.read_bytes()
     report: list[str] = [f"# target.h derivation report for {args.profile}", ""]
 
     def derived(label: str) -> None:
@@ -802,7 +831,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
         derived(f"BUILD_FINGERPRINT = {fingerprint} (--fingerprint input)")
     if not fingerprint:
         # keep the scaffold value but flatten it so downstream gates can parse it
-        template_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+"([^"]+)"', text)
+        template_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+[\s\\]*"([^"]+)"', text)
         if template_match:
             text = set_define(text, "BUILD_FINGERPRINT", f'"{template_match.group(1)}"')
             scaffolded("BUILD_FINGERPRINT", "no fota.zip and no --fingerprint; template value flattened and kept")
@@ -833,13 +862,14 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
         report.append("- [WARN] no vmlinux nm dump supplied; symbol offsets are NOT derived")
     if base is not None and nm:
         for macro, symbol in SYMBOL_OFFSET_MACROS.items():
-            addr = nm.get(symbol)
-            if addr is None:
+            resolved = resolve_symbol(nm, macro, symbol)
+            if resolved is None:
                 scaffolded(macro, f"symbol {symbol} not in recovered vmlinux")
                 continue
+            found_symbol, addr = resolved
             offset = addr - base
             text = set_define_num(text, macro, offset)
-            derived(f"{macro} = 0x{offset:x} (nm {symbol} - base)")
+            derived(f"{macro} = 0x{offset:x} (nm {found_symbol} - base)")
         for macro, (symbol, struct_name, member) in COMPOSITE_SYMBOL_MACROS.items():
             addr = nm.get(symbol)
             member_off = struct_member_offset(args.struct_offsets, struct_name, member)
@@ -953,7 +983,10 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
 
     args.target_dir.mkdir(parents=True, exist_ok=True)
     out = args.target_dir / "target.h"
-    out.write_text(text, encoding="utf-8")
+    # keep the template's line endings so a re-derivation of an existing header
+    # produces no whole-file EOL diff against the committed CRLF files
+    out_text = text.replace("\n", "\r\n") if template_crlf else text
+    out.write_text(out_text, encoding="utf-8", newline="")
     report_path = args.report or (args.target_dir / "port-report.md")
     report_path.write_text("\n".join(report) + "\n", encoding="utf-8")
     derived_count = sum(1 for line in report if line.startswith("- [DERIVED]"))
@@ -1067,7 +1100,13 @@ def cmd_scaffold_target(args: argparse.Namespace) -> int:
         (dst / "target.h").unlink(missing_ok=True)
         print("note: target.h not copied (--skip-target-header); run gen-target-h to derive it")
     if args.p0_header:
-        shutil.copyfile(args.p0_header, dst / "p0_fingerprint.h")
+        p0_out = dst / "p0_fingerprint.h"
+        p0_text = Path(args.p0_header).read_text(encoding="utf-8", errors="replace")
+        # when replacing an existing committed (CRLF) fingerprint, match its
+        # line endings so the round-trip produces no whole-file EOL diff
+        if p0_out.exists() and b"\r\n" in p0_out.read_bytes():
+            p0_text = p0_text.replace("\n", "\r\n")
+        p0_out.write_text(p0_text, encoding="utf-8", newline="")
     readme = dst / "README.md"
     if args.write_readme and not readme.exists():
         readme.write_text(
@@ -1122,6 +1161,7 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     payload_id = args.payload_id or args.profile
     feed_path = repo / "support" / "targets-v3.json"
     original = feed_path.read_text(encoding="utf-8")
+    feed_crlf = b"\r\n" in feed_path.read_bytes()
     data = json.loads(original)
     existing_entries = [p for p in data.get("payloads", []) if p.get("payloadId") == payload_id]
     existing = existing_entries[0] if existing_entries else {}
@@ -1151,16 +1191,92 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
         entry["requiresFreshP0Session"] = existing["requiresFreshP0Session"]
     elif args.requires_fresh_p0_session:
         entry["requiresFreshP0Session"] = True
-    payloads = [p for p in data.get("payloads", []) if p.get("payloadId") != payload_id]
-    payloads.append(entry)
-    data["payloads"] = payloads
-    new_text = json.dumps(data, indent=2) + "\n"
-    # keep the file's existing line endings so a no-op update produces no diff
-    if "\r\n" in original:
+    # work in LF-normalized text (read_text already normalized), then restore
+    # the file's original line endings at write time so a no-op update is
+    # byte-for-byte identical
+    span = find_payload_span(original, payload_id)
+    if span is not None and span[2] == entry:
+        # the entry is semantically unchanged: keep its exact original text so
+        # a re-port of an existing payload produces no feed diff at all
+        new_text = original
+    elif span is not None:
+        start, end, _old = span
+        new_text = original[:start] + serialize_payload_entry(entry) + original[end:]
+    else:
+        arr_close = original.rfind("]")
+        new_text = (
+            original[:arr_close]
+            + ",\n"
+            + serialize_payload_entry(entry)
+            + "\n"
+            + original[arr_close:]
+        )
+    if feed_crlf:
         new_text = new_text.replace("\n", "\r\n")
-    feed_path.write_text(new_text, encoding="utf-8")
+    feed_path.write_text(new_text, encoding="utf-8", newline="")
     print(f"updated {feed_path}")
     return 0
+
+
+def find_payload_span(text: str, payload_id: str) -> tuple[int, int, dict] | None:
+    """Locate the exact text span (start, end, parsed obj) of a payload entry."""
+    dec = json.JSONDecoder()
+    try:
+        key = text.index('"payloads"')
+        arr = text.index("[", key)
+    except ValueError:
+        return None
+    idx = arr + 1
+    while True:
+        while idx < len(text) and text[idx] in " \t\r\n":
+            idx += 1
+        if idx >= len(text) or text[idx] == "]":
+            return None
+        try:
+            obj, end = dec.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            return None
+        if obj.get("payloadId") == payload_id:
+            e = end
+            while e < len(text) and text[e] in " \t\r\n":
+                e += 1
+            if e < len(text) and text[e] == ",":
+                e += 1
+            return idx, e, obj
+        idx = end
+        while idx < len(text) and text[idx] in " \t\r\n,":
+            idx += 1
+
+
+def serialize_payload_entry(entry: dict, eol: str = "\n") -> str:
+    """Render one payload entry in the upstream feed style: 6-space fields,
+    short arrays (<=2 items) inline, longer arrays and objects multi-line."""
+    field = "      "
+    sub = "        "
+    lines = ["    {"]
+    keys = list(entry.keys())
+    for i, k in enumerate(keys):
+        comma = "," if i < len(keys) - 1 else ""
+        v = entry[k]
+        if isinstance(v, dict):
+            lines.append(f'{field}"{k}": {{')
+            sk = list(v.keys())
+            for j, s in enumerate(sk):
+                sc = "," if j < len(sk) - 1 else ""
+                lines.append(f'{sub}"{s}": {json.dumps(v[s])}{sc}')
+            lines.append(f"{field}}}{comma}")
+        elif isinstance(v, list) and len(v) <= 2:
+            lines.append(f'{field}"{k}": {json.dumps(v)}{comma}')
+        elif isinstance(v, list):
+            lines.append(f'{field}"{k}": [')
+            for j, item in enumerate(v):
+                ic = "," if j < len(v) - 1 else ""
+                lines.append(f"{sub}{json.dumps(item)}{ic}")
+            lines.append(f"{field}]{comma}")
+        else:
+            lines.append(f'{field}"{k}": {json.dumps(v)}{comma}')
+    lines.append("    }")
+    return eol.join(lines)
 
 
 def cmd_validate_feed(args: argparse.Namespace) -> int:
@@ -1260,7 +1376,7 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
 
     # BUILD_FINGERPRINT is provenance metadata; the exploit never reads it at
     # runtime, so a missing/wrong fingerprint is a loud warning, not a hard gate.
-    fingerprint_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+"([^"]+)"', target_text)
+    fingerprint_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+[\s\\]*"([^"]+)"', target_text)
     if fingerprint_match:
         fingerprint = fingerprint_match.group(1)
         if ap_build not in fingerprint:
@@ -1388,16 +1504,18 @@ def cmd_validate_analysis(args: argparse.Namespace) -> int:
     if base is not None and nm:
         for macro, symbol in symbol_checks.items():
             expected = parse_macro_int(target_text, macro)
-            actual_addr = nm.get(symbol)
+            resolved = resolve_symbol(nm, macro, symbol)
             if expected is None:
                 errors.append(f"target.h missing numeric {macro}")
-            elif actual_addr is None:
+            elif resolved is None:
                 errors.append(f"vmlinux nm missing symbol {symbol} for {macro}")
-            elif actual_addr - base != expected:
-                errors.append(
-                    f"{macro} mismatch: target.h=0x{expected:x} "
-                    f"nm({symbol})-base=0x{actual_addr - base:x}"
-                )
+            else:
+                found_symbol, actual_addr = resolved
+                if actual_addr - base != expected:
+                    errors.append(
+                        f"{macro} mismatch: target.h=0x{expected:x} "
+                        f"nm({found_symbol})-base=0x{actual_addr - base:x}"
+                    )
 
     if args.btf_raw:
         if not args.btf_raw.exists():

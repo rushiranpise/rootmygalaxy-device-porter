@@ -177,6 +177,15 @@ def main() -> None:
              "--model", "SM-S721N", "--kernel-version", KERNEL_VERSION,
              "--exploit-path", str(payloads / "artifacts" / PROFILE / "cve-2026-43499-app.so"),
              "--kernelsu-path", str(payloads / "kernelsu" / "ksud-s25u-kdp")], cwd=REPO)
+        # add-feed-entry must be idempotent: an identical update leaves the feed byte-identical
+        feed_before = (payloads / "support" / "targets-v3.json").read_bytes()
+        run(["add-feed-entry", "--payloads-repo", str(payloads), "--profile", PROFILE,
+             "--display-name", "Galaxy Test | Kernel 6.1.157",
+             "--model", "SM-S721N", "--kernel-version", KERNEL_VERSION,
+             "--exploit-path", str(payloads / "artifacts" / PROFILE / "cve-2026-43499-app.so"),
+             "--kernelsu-path", str(payloads / "kernelsu" / "ksud-s25u-kdp")], cwd=REPO)
+        assert (payloads / "support" / "targets-v3.json").read_bytes() == feed_before
+        print("PASS add-feed-entry idempotent: repeated identical update leaves the feed byte-identical")
         run(["validate-feed", "--payloads-repo", str(payloads)], cwd=REPO)
         run(["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,
              "--version", FOUR_PART, "--kernel-version", KERNEL_VERSION,
@@ -221,10 +230,8 @@ def main() -> None:
              "--fingerprint", "samsung/r12sksx/essi:16/BP4A.251205.006/ZZ999:user/release-keys",
              "--elf-base", hex(KIMAGE_TEXT_BASE)], cwd=REPO)
         bad_hdr = (bad_dir / "target.h").read_text(encoding="utf-8")
-        fingerprint_line = next(
-            l for l in bad_hdr.splitlines() if l.strip().startswith("#define BUILD_FINGERPRINT")
-        )
-        assert "ZZ999" in fingerprint_line and "S721NKSSCDZF3" not in fingerprint_line
+        # the fingerprint may sit on a backslash-continuation line
+        assert "ZZ999" in bad_hdr and "S721NKSSCDZF3" not in bad_hdr
         # swap it into the payloads repo: the AP build mismatch is a warning, not a failure
         (payloads / "src" / "targets" / PROFILE / "target.h").write_text(bad_hdr, encoding="utf-8")
         proc = subprocess.run(CLI + ["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,

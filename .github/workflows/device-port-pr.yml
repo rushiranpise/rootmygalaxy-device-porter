@@ -113,13 +113,26 @@ jobs:
 
       - name: Prepare optional bpftool
         run: |
-          BPFTOOL="$(command -v bpftool || true)"
-          if [ -z "$BPFTOOL" ]; then
-            BPFTOOL="$(find /usr/lib/linux-tools-* -name bpftool -type f 2>/dev/null | sort -V | tail -n 1 || true)"
-          fi
-          if [ -n "$BPFTOOL" ]; then
-            echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
+          # On ubuntu-24.04, /usr/bin/bpftool is a linux-tools-common wrapper that
+          # resolves a per-kernel binary and exits non-zero when the runner kernel's
+          # linux-tools package is missing. Probe each candidate and keep the first
+          # one that actually runs; if none works, BPFTOOL stays empty and the raw
+          # BTF header validation in the porter still covers the porting gate.
+          candidate="$(command -v bpftool || true)"
+          if [ -n "$candidate" ] && "$candidate" version >/dev/null 2>&1; then
+            echo "BPFTOOL=$candidate" >> "$GITHUB_ENV"
+            echo "bpftool: $candidate"
           else
+            for bin in $(find /usr/lib/linux-tools-* -name bpftool -type f 2>/dev/null | sort -V); do
+              if "$bin" version >/dev/null 2>&1; then
+                candidate="$bin"
+                echo "BPFTOOL=$bin" >> "$GITHUB_ENV"
+                echo "bpftool: $bin"
+                break
+              fi
+            done
+          fi
+          if [ -z "${candidate:-}" ]; then
             echo "BPFTOOL=" >> "$GITHUB_ENV"
             echo "bpftool unavailable; raw BTF header validation will still run."
           fi
@@ -150,8 +163,9 @@ jobs:
                 --region "${{ inputs.region }}" \
                 --all \
                 --verbose | tee ".work/${{ inputs.profile }}/samloader-check-update.txt"
-              version="$(python3 -c 'from pathlib import Path; import re, sys; text = Path(".work/${{ inputs.profile }}/samloader-check-update.txt").read_text(); match = re.search(r"Latest Stable Version:\s*([A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+)", text); sys.exit("samloader check-update did not print a latest stable four-part version") if not match else print(match.group(1))')"
-              echo "Resolved latest firmware version: $version"
+              version="$(rmg-port samloader-version \
+                --check-update-file ".work/${{ inputs.profile }}/samloader-check-update.txt")"
+              echo "Resolved latest stable firmware version: $version"
             fi
             samloader download \
               --model "${{ inputs.model }}" \
@@ -190,7 +204,7 @@ jobs:
             > ".work/${{ inputs.profile }}/worker_thread.objdump" || true
           if [ -n "$BPFTOOL" ] && [ -f ".work/${{ inputs.profile }}/vmlinux.btf" ]; then
             "$BPFTOOL" btf dump file ".work/${{ inputs.profile }}/vmlinux.btf" format raw \
-              > ".work/${{ inputs.profile }}/vmlinux-btf.raw"
+              > ".work/${{ inputs.profile }}/vmlinux-btf.raw" || true
           fi
           rmg-port gen-p0 \
             --kernel ".work/${{ inputs.profile }}/kernel" \
@@ -371,7 +385,11 @@ jobs:
           GH_TOKEN: ${{ secrets.PAYLOADS_PR_TOKEN }}
           PAYLOADS_PR_TOKEN: ${{ secrets.PAYLOADS_PR_TOKEN }}
         run: |
-          test -n "$PAYLOADS_PR_TOKEN"
+          if [ -z "$PAYLOADS_PR_TOKEN" ]; then
+            echo "PAYLOADS_PR_TOKEN secret is not set; skipping PR creation." >&2
+            echo "Add a PAT (repo scope) as the PAYLOADS_PR_TOKEN secret to open the PR." >&2
+            exit 1
+          fi
           branch="device-port/${{ inputs.profile }}"
           git config user.name "rootmygalaxy-device-porter"
           git config user.email "rootmygalaxy-device-porter@users.noreply.github.com"

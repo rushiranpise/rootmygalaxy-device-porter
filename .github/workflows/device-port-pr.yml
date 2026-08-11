@@ -607,6 +607,13 @@ jobs:
           # fetch it so the force-with-lease lease is valid, then force over it
           git fetch origin "$branch" 2>/dev/null || true
           git push --force-with-lease origin "$branch"
+          # the branch may already have an open PR from a previous run; in that
+          # case the force-push above already updated it, so just point at it
+          if gh pr view "$branch" --repo "${{ inputs.payloads_repo }}" >/dev/null 2>&1; then
+            echo "PR for $branch already exists; the force-push above updated it."
+            gh pr view "$branch" --repo "${{ inputs.payloads_repo }}" --json number,url --jq '"number=" + (.number|tostring) + " url=" + .url'
+            exit 0
+          fi
           gh pr create \
             --repo "${{ inputs.payloads_repo }}" \
             --base main \

@@ -92,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--template", required=True, type=Path, help="source target's target.h used as the header scaffold")
     p.add_argument("--profile", required=True)
     p.add_argument("--fota-props", type=Path)
+    p.add_argument("--fingerprint", help="ro.build.fingerprint override, used when fota.zip is unavailable")
     p.add_argument("--vmlinux-nm", type=Path)
     p.add_argument("--vmlinux-elf", type=Path)
     p.add_argument("--elf-base", help="recovered ELF base as hex, overrides ELF segment scan")
@@ -727,9 +728,10 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
         derived(f"KIMAGE_TEXT_BASE = 0x{base:x} (recovered ELF PT_LOAD base)")
 
     # --- firmware identity ------------------------------------------------
+    fingerprint: str | None = None
     if args.fota_props and args.fota_props.exists():
         props = json.loads(args.fota_props.read_text(encoding="utf-8"))
-        fingerprint = props.get("fingerprint")
+        fingerprint = props.get("fingerprint") or None
         if fingerprint:
             text = set_define(text, "BUILD_FINGERPRINT", f'"{fingerprint}"')
             derived(f"BUILD_FINGERPRINT = {fingerprint} (fota.zip ro.build.fingerprint)")
@@ -737,8 +739,18 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             scaffolded("BUILD_FINGERPRINT", "fota.zip had no ro.build.fingerprint")
         if props.get("display_id"):
             report.append(f"- [INFO] ro.build.display.id = {props['display_id']}")
-    else:
-        scaffolded("BUILD_FINGERPRINT", "no fota props supplied")
+    if not fingerprint and args.fingerprint:
+        fingerprint = args.fingerprint
+        text = set_define(text, "BUILD_FINGERPRINT", f'"{fingerprint}"')
+        derived(f"BUILD_FINGERPRINT = {fingerprint} (--fingerprint input)")
+    if not fingerprint:
+        # keep the scaffold value but flatten it so downstream gates can parse it
+        template_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+"([^"]+)"', text)
+        if template_match:
+            text = set_define(text, "BUILD_FINGERPRINT", f'"{template_match.group(1)}"')
+            scaffolded("BUILD_FINGERPRINT", "no fota.zip and no --fingerprint; template value flattened and kept")
+        else:
+            scaffolded("BUILD_FINGERPRINT", "no fota.zip and no --fingerprint; template has no fingerprint either")
 
     # Each variant label is a distinct string; replace by content, not by macro
     # name (replace_define would clobber both branches with the same label).
@@ -1162,13 +1174,23 @@ def cmd_validate_port(args: argparse.Namespace) -> int:
         if not any(re.search(rf"^\s*#define\s+{re.escape(macro)}\b", target_text, re.MULTILINE) for macro in macros):
             errors.append(f"target.h missing required macro group {label}: one of {', '.join(macros)}")
 
+    # BUILD_FINGERPRINT is provenance metadata; the exploit never reads it at
+    # runtime, so a missing/wrong fingerprint is a loud warning, not a hard gate.
     fingerprint_match = re.search(r'#define\s+BUILD_FINGERPRINT\s+"([^"]+)"', target_text)
     if fingerprint_match:
         fingerprint = fingerprint_match.group(1)
         if ap_build not in fingerprint:
-            errors.append(f"BUILD_FINGERPRINT does not contain AP build {ap_build}: {fingerprint}")
+            print(
+                f"[WARN] BUILD_FINGERPRINT does not contain AP build {ap_build}: "
+                f"{fingerprint}; supply the fingerprint input or a fota.zip build for provenance",
+                file=sys.stderr,
+            )
     else:
-        errors.append("target.h does not define BUILD_FINGERPRINT")
+        print(
+            f"[WARN] target.h does not define a parseable BUILD_FINGERPRINT; "
+            "provenance metadata will be missing from the port",
+            file=sys.stderr,
+        )
 
     expected_p0_include = f'targets/{profile}/p0_fingerprint.h'
     if target_text and expected_p0_include not in target_text:

@@ -59,6 +59,10 @@ on:
       kernel_release:
         description: full kernel release/vermagic; auto-detected from the kernel banner when empty
         required: false
+      fingerprint:
+        description: ro.build.fingerprint for BUILD_FINGERPRINT when the firmware zip has no meta-data/fota.zip (provenance metadata only)
+        required: false
+        default: ""
       release_size_max:
         description: maximum release payload size in bytes
         required: true
@@ -256,6 +260,9 @@ jobs:
           w=".work/${{ inputs.profile }}"
           derive_args=""
           [ -f "$w/fota-props.json" ] && derive_args="$derive_args --fota-props $w/fota-props.json"
+          if [ -n "${{ inputs.fingerprint }}" ]; then
+            derive_args="$derive_args --fingerprint ${{ inputs.fingerprint }}"
+          fi
           [ -f "$w/vmlinux.nm" ] && derive_args="$derive_args --vmlinux-nm $w/vmlinux.nm"
           [ -f "$w/vmlinux.elf" ] && derive_args="$derive_args --vmlinux-elf $w/vmlinux.elf"
           [ -f "$w/struct-offsets.json" ] && derive_args="$derive_args --struct-offsets $w/struct-offsets.json"
@@ -438,7 +445,7 @@ jobs:
           fi
           kernel_version="${{ inputs.kernel_version }}"
           if [ -z "$kernel_version" ] && [ -f "$w/kernel-release.txt" ]; then
-            kernel_version="$(cut -d. -f1-3 < "$w/kernel-release.txt")"
+            kernel_version="$(sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/' < "$w/kernel-release.txt")"
             echo "kernel_version auto-detected: $kernel_version"
           fi
           if [ -z "$kernel_version" ]; then

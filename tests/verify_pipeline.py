@@ -212,20 +212,20 @@ def main() -> None:
         assert proc.returncode != 0 and "does not match the leading" in proc.stdout + proc.stderr
         print("PASS kernel version gate: feed kernelVersions must match leading 3 parts of the release")
 
-        # 4. a wrong-AP fingerprint in the payloads repo header must fail validate-port
-        bad = work / "bad-fingerprint.json"
-        bad.write_text(json.dumps({"fingerprint": "samsung/r12sksx/essi:16/BP4A.251205.006/ZZ999:user/release-keys"}),
-                       encoding="utf-8")
+        # 4. fingerprint provenance: --fingerprint fills in a missing fota.zip,
+        # and validate-port downgrades a wrong-AP fingerprint to a loud warning
         bad_dir = work / "bad-target"
         bad_dir.mkdir()
         run(["gen-target-h", "--target-dir", str(bad_dir), "--template", str(TEMPLATE),
-             "--profile", PROFILE, "--fota-props", str(bad), "--elf-base", hex(KIMAGE_TEXT_BASE)], cwd=REPO)
+             "--profile", PROFILE,
+             "--fingerprint", "samsung/r12sksx/essi:16/BP4A.251205.006/ZZ999:user/release-keys",
+             "--elf-base", hex(KIMAGE_TEXT_BASE)], cwd=REPO)
         bad_hdr = (bad_dir / "target.h").read_text(encoding="utf-8")
         fingerprint_line = next(
             l for l in bad_hdr.splitlines() if l.strip().startswith("#define BUILD_FINGERPRINT")
         )
         assert "ZZ999" in fingerprint_line and "S721NKSSCDZF3" not in fingerprint_line
-        # swap it into the payloads repo: the AP build check must now fail
+        # swap it into the payloads repo: the AP build mismatch is a warning, not a failure
         (payloads / "src" / "targets" / PROFILE / "target.h").write_text(bad_hdr, encoding="utf-8")
         proc = subprocess.run(CLI + ["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,
                                      "--version", FOUR_PART, "--kernel-version", KERNEL_VERSION,
@@ -233,8 +233,9 @@ def main() -> None:
                                      "--kernelsu-path", str(payloads / "kernelsu" / "ksud-s25u-kdp"),
                                      "--release-size-max", "200000"],
                               cwd=REPO, capture_output=True, text=True)
-        assert proc.returncode != 0 and "BUILD_FINGERPRINT does not contain AP build" in proc.stdout + proc.stderr
-        print("PASS fingerprint gate: validate-port rejects a wrong-AP BUILD_FINGERPRINT")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "BUILD_FINGERPRINT does not contain AP build" in proc.stdout + proc.stderr
+        print("PASS fingerprint provenance: --fingerprint fills the header; wrong-AP is a warning")
 
         print("ALL PIPELINE CHECKS PASSED")
     finally:

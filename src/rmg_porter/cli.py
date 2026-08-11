@@ -56,6 +56,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, type=Path)
     p.set_defaults(func=cmd_gen_p0)
 
+    p = sub.add_parser(
+        "samloader-version",
+        help="Print the newest stable four-part version from samloader check-update output",
+    )
+    p.add_argument("--check-update-file", required=True, type=Path)
+    p.set_defaults(func=cmd_samloader_version)
+
     p = sub.add_parser("scaffold-target", help="Create src/targets/<profile> skeleton")
     p.add_argument("--payloads-repo", required=True, type=Path)
     p.add_argument("--profile", required=True)
@@ -141,6 +148,44 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+FOUR_PART_VERSION = r"[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+/[A-Z0-9]+"
+
+
+def cmd_samloader_version(args: argparse.Namespace) -> int:
+    text = args.check_update_file.read_text(encoding="utf-8", errors="replace")
+    # samloader-rs check-update --all prints:
+    #   Latest Stable Version:
+    #   <version>            (value on the NEXT line, and may be empty)
+    #   Previous Stable Versions (sorted from new to old):
+    #   <version>
+    #   ...
+    #   Beta Versions ...
+    # Match the value directly under the label first; when the label is empty
+    # (no stable version reported), fall back to the newest previous stable.
+    match = re.search(r"Latest Stable Version:\s*(" + FOUR_PART_VERSION + r")", text)
+    if not match:
+        match = re.search(
+            r"Previous Stable Versions[^\n]*\n\s*(" + FOUR_PART_VERSION + r")",
+            text,
+        )
+        if match:
+            print(
+                "note: samloader reported no value under 'Latest Stable Version'; "
+                "using the newest previous stable version",
+                file=sys.stderr,
+            )
+    if not match:
+        # Plain `check-update` (no --all) prints the latest version alone.
+        match = re.search(r"\b(" + FOUR_PART_VERSION + r")\b", text)
+    if not match:
+        raise ValueError(
+            "no stable four-part firmware version found in samloader check-update output; "
+            "supply the exact AP/CSC/CP/AP version with --version instead"
+        )
+    print(match.group(1))
+    return 0
+
+
 def cmd_extract_kernel(args: argparse.Namespace) -> int:
     args.workdir.mkdir(parents=True, exist_ok=True)
     ap_member = extract_ap_archive(args.firmware_zip, args.workdir)
@@ -159,16 +204,23 @@ def cmd_extract_kernel(args: argparse.Namespace) -> int:
 
 
 def extract_ap_archive(firmware_zip: Path, workdir: Path) -> Path:
-    with zipfile.ZipFile(firmware_zip) as archive:
-        names = archive.namelist()
-        ap_names = [name for name in names if Path(name).name.startswith("AP_")]
-        if not ap_names:
-            raise ValueError("no AP_*.tar.md5 found in firmware zip")
-        ap_name = ap_names[0]
-        out = workdir / Path(ap_name).name
-        with archive.open(ap_name) as src, out.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
-        return out
+    try:
+        with zipfile.ZipFile(firmware_zip) as archive:
+            names = archive.namelist()
+            ap_names = [name for name in names if Path(name).name.startswith("AP_")]
+            if not ap_names:
+                raise ValueError("no AP_*.tar.md5 found in firmware zip")
+            ap_name = ap_names[0]
+            out = workdir / Path(ap_name).name
+            with archive.open(ap_name) as src, out.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            return out
+    except zipfile.BadZipFile as exc:
+        raise ValueError(
+            f"{firmware_zip} is not a valid zip archive; "
+            "samloader download --out-file writes a decrypted plain zip, "
+            "but a raw .enc4 or direct-firmware-url download must be decrypted first"
+        ) from exc
 
 
 def extract_from_tar(tar_path: Path, member_suffix: str, workdir: Path) -> Path:

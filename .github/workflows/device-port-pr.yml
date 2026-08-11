@@ -298,9 +298,9 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           set -euo pipefail
-          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_OPTIONS_JSON") or "{}"); keys=("source_repo","source_ref","patch_path","build_command","built_ko_path","manual_relocation"); print("\n".join(f"KERNELSU_{k.upper()}={shlex.quote(str(opts.get(k, \"\")))}" for k in keys))' > ".work/kernelsu-options.env"
+          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_OPTIONS_JSON") or "{}"); keys=("source_repo","source_ref","patch_path","build_command","built_ko_path","manual_relocation"); print("\n".join("KERNELSU_%s=%s" % (k.upper(), shlex.quote(str(opts.get(k) or ""))) for k in keys))' > ".work/kernelsu-options.env"
           . ".work/kernelsu-options.env"
-          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_DDK_JSON") or "{}"); keys=("image","release","kmi_asset"); print("\n".join(f"KERNELSU_DDK_{k.upper()}={shlex.quote(str(opts.get(k, \"\")))}" for k in keys))' > ".work/kernelsu-ddk.env"
+          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_DDK_JSON") or "{}"); keys=("image","release","kmi_asset"); print("\n".join("KERNELSU_DDK_%s=%s" % (k.upper(), shlex.quote(str(opts.get(k) or ""))) for k in keys))' > ".work/kernelsu-ddk.env"
           . ".work/kernelsu-ddk.env"
           profile="${{ inputs.profile }}"
           w=".work/$profile"
@@ -428,7 +428,7 @@ jobs:
           KERNELSU_OPTIONS_JSON: ${{ inputs.kernelsu_options_json }}
         run: |
           set -euo pipefail
-          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_OPTIONS_JSON") or "{}"); keys=("ko_artifact","check_symbol_log","module_audit_log"); print("\n".join(f"KERNELSU_{k.upper()}={shlex.quote(str(opts.get(k, \"\")))}" for k in keys))' > ".work/kernelsu-options.env"
+          python3 -c 'import json, os, shlex; opts=json.loads(os.environ.get("KERNELSU_OPTIONS_JSON") or "{}"); keys=("ko_artifact","check_symbol_log","module_audit_log"); print("\n".join("KERNELSU_%s=%s" % (k.upper(), shlex.quote(str(opts.get(k) or ""))) for k in keys))' > ".work/kernelsu-options.env"
           . ".work/kernelsu-options.env"
           profile="${{ inputs.profile }}"
           w=".work/$profile"
@@ -531,7 +531,20 @@ jobs:
           name: port-${{ inputs.profile }}
           if-no-files-found: warn
           path: |
-            porter/.work/${{ inputs.profile }}/*
+            porter/.work/${{ inputs.profile }}/kernel
+            porter/.work/${{ inputs.profile }}/vmlinux.nm
+            porter/.work/${{ inputs.profile }}/vmlinux.elf
+            porter/.work/${{ inputs.profile }}/vmlinux.btf
+            porter/.work/${{ inputs.profile }}/struct-offsets.json
+            porter/.work/${{ inputs.profile }}/fota-props.json
+            porter/.work/${{ inputs.profile }}/kernel-release.txt
+            porter/.work/${{ inputs.profile }}/resolved-version.txt
+            porter/.work/${{ inputs.profile }}/p0_fingerprint.h
+            porter/.work/${{ inputs.profile }}/worker_thread.objdump
+            porter/.work/${{ inputs.profile }}/vmlinux-btf.raw
+            porter/.work/${{ inputs.profile }}/kernelsu.modinfo
+            porter/.work/${{ inputs.profile }}/check_symbol.log
+            porter/.work/${{ inputs.profile }}/module_audit.log
             payloads/src/targets/${{ inputs.profile }}
             payloads/artifacts/${{ inputs.profile }}
             payloads/support/targets-v3.json

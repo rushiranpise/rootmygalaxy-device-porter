@@ -171,6 +171,26 @@ def main() -> None:
         assert derived + kept >= 50, f"only {derived} derived + {kept} value-matched entries"
         print(f"PASS scaffold+derive: target.h written with {derived} derived + {kept} value-matched macros")
 
+        # re-port over an EXISTING profile with a FOREIGN source_target (the
+        # psq/pa3q scenario): scaffold-target must preserve the profile's own
+        # committed header as <profile>.source-backup and the workflow's
+        # template selection must use it, so never-derived macros keep their
+        # values instead of leaking the source target's.
+        run(["scaffold-target", "--payloads-repo", str(payloads), "--profile", PROFILE,
+             "--source-target", "essi-S721NKSSCDZF3",
+             "--p0-header", str(PAYLOADS / "src" / "targets" / "essi-S721NKSSCDZF3" / "p0_fingerprint.h"),
+             "--skip-target-header", "--replace-existing"], cwd=REPO)
+        backup_h = payloads / "src" / "targets" / f"{PROFILE}.source-backup" / "target.h"
+        assert backup_h.exists(), "re-port scaffold must preserve the profile's own header as .source-backup"
+        assert backup_h.read_bytes() == original_target_h, "source-backup must be the profile's own committed header"
+        run(["gen-target-h", "--target-dir", str(payloads / "src" / "targets" / PROFILE),
+             "--template", str(backup_h), "--profile", PROFILE,
+             "--fota-props", str(props_path), "--vmlinux-nm", str(nm_path),
+             "--elf-base", hex(KIMAGE_TEXT_BASE), "--struct-offsets", str(so_path)], cwd=REPO)
+        rederived = (payloads / "src" / "targets" / PROFILE / "target.h").read_bytes()
+        assert rederived == original_target_h, "re-port with foreign source_target must round-trip the profile's own header"
+        print("PASS re-port with foreign source_target: committed header preserved and round-trips (never-derived macros intact)")
+
         # 3. fake artifacts + feed entry + validation gates
         (payloads / "artifacts" / PROFILE).mkdir(parents=True)
         (payloads / "artifacts" / PROFILE / "cve-2026-43499-app.so").write_bytes(b"\x00" * 104128)

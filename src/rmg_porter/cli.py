@@ -1196,17 +1196,27 @@ def cmd_scaffold_target(args: argparse.Namespace) -> int:
     dst = targets / args.profile
     if not src.exists():
         raise ValueError(f"source target does not exist: {src}")
+    backup = targets / f"{args.profile}.source-backup"
     if dst.exists():
         if not args.replace_existing:
             raise ValueError(f"target already exists: {dst}")
-        if src.resolve() == dst.resolve():
-            backup = targets / f"{args.profile}.source-backup"
-            if backup.exists():
-                shutil.rmtree(backup)
-            shutil.copytree(src, backup)
-            src = backup
+        if backup.exists():
+            shutil.rmtree(backup)
+        # Always preserve the profile's own committed files before scaffolding
+        # over them, not just when source_target == profile. Never-derived
+        # macros (SLIDE_NFULNL_LOGGER_NAME_OFF, SLIDE_TRACEFS_EVENT_ID, ...)
+        # carry device-tested values; gen-target-h selects this backup as its
+        # template, so a re-port with a foreign source_target must not clobber
+        # them with the source target's values.
+        shutil.copytree(dst, backup)
+    # A re-port scaffolds from the profile's own committed files (never-derived
+    # values stay put); a genuinely new profile scaffolds from the source target.
+    basis = backup if backup.exists() else src
+    if dst.exists():
         shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    if basis != src:
+        print(f"note: {args.profile} already exists; scaffolding from its own committed files, ignoring source_target {args.source_target}")
+    shutil.copytree(basis, dst)
     if args.skip_target_header:
         (dst / "target.h").unlink(missing_ok=True)
         print("note: target.h not copied (--skip-target-header); run gen-target-h to derive it")

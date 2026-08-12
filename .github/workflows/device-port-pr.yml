@@ -267,13 +267,26 @@ jobs:
           [ -f "$w/vmlinux.elf" ] && derive_args="$derive_args --vmlinux-elf $w/vmlinux.elf"
           [ -f "$w/struct-offsets.json" ] && derive_args="$derive_args --struct-offsets $w/struct-offsets.json"
           [ -f "$w/worker_thread.objdump" ] && derive_args="$derive_args --worker-objdump $w/worker_thread.objdump"
-          template="../payloads/src/targets/${{ inputs.source_target }}/target.h"
-          if [ ! -f "$template" ] && [ -f "../payloads/src/targets/${{ inputs.source_target }}.source-backup/target.h" ]; then
-            # source_target == profile: scaffold-target kept the original header
-            # in <profile>.source-backup before --skip-target-header removed it.
-            template="../payloads/src/targets/${{ inputs.source_target }}.source-backup/target.h"
-            echo "using scaffold source backup as template: $template"
+          # Prefer the profile's OWN committed header as the derive template so
+          # never-derived macros (SLIDE_NFULNL_LOGGER_NAME_OFF, ...) keep their
+          # device-tested values. scaffold-target preserves the committed files
+          # as <profile>.source-backup whenever the profile already exists; a
+          # foreign source_target is only used for genuinely new profiles.
+          template="../payloads/src/targets/${{ inputs.profile }}.source-backup/target.h"
+          if [ ! -f "$template" ]; then
+            template="../payloads/src/targets/${{ inputs.profile }}/target.h"
           fi
+          if [ ! -f "$template" ]; then
+            template="../payloads/src/targets/${{ inputs.source_target }}/target.h"
+          fi
+          if [ ! -f "$template" ]; then
+            template="../payloads/src/targets/${{ inputs.source_target }}.source-backup/target.h"
+          fi
+          if [ ! -f "$template" ]; then
+            echo "no target.h template found (profile or source_target) for ${{ inputs.profile }}" >&2
+            exit 1
+          fi
+          echo "using derive template: $template"
           rmg-port gen-target-h \
             --target-dir "../payloads/src/targets/${{ inputs.profile }}" \
             --template "$template" \

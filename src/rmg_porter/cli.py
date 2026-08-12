@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import re
 import shutil
@@ -547,11 +548,22 @@ def cmd_extract_kernel(args: argparse.Namespace) -> int:
     boot_path = args.workdir / "boot.img"
     boot_path.write_bytes(boot)
     kernel_size = struct.unpack_from("<I", boot, 0x08)[0]
-    kernel = boot[0x1000 : 0x1000 + kernel_size]
+    kernel_payload = boot[0x1000 : 0x1000 + kernel_size]
+    # Some Samsung kernels (Mediatek 5.10/5.15) ship the payload as gzip; the
+    # stored `kernel` must be the raw ARM64 Image so BTF scans, the p0
+    # fingerprint generator, and the banner scan all read real bytes instead
+    # of compressed data.
+    compressed = kernel_payload[:2] == b"\x1f\x8b"
+    if compressed:
+        kernel = gzip.decompress(kernel_payload)
+        print(f"kernel payload is gzip-compressed ({len(kernel_payload)} bytes); "
+              f"stored decompressed Image ({len(kernel)} bytes)")
+    else:
+        kernel = kernel_payload
     kernel_path = args.workdir / "kernel"
     kernel_path.write_bytes(kernel)
     print(f"boot.img sha256: {sha256_file(boot_path)}")
-    print(f"kernel size: {kernel_size}")
+    print(f"kernel size: {len(kernel)}")
     print(f"kernel sha256: {sha256_file(kernel_path)}")
     release = kernel_release_from_image(kernel)
     if release:
@@ -627,8 +639,24 @@ def decompress_lz4(path: Path) -> bytes:
     return lz4.frame.decompress(path.read_bytes())
 
 
+def load_raw_image(path: Path) -> bytes:
+    """Read a kernel payload as a raw ARM64 Image.
+
+    Some Samsung boot images (observed on Mediatek 5.10/5.15 kernels such as
+    the A155N and a15x) store the kernel payload as a gzip stream. Every
+    consumer of the raw Image (BTF scan, p0 fingerprint, banner scan) needs
+    the decompressed bytes; vmlinux-to-elf handles this internally, so the
+    nm-based offsets worked while the byte-level consumers silently read
+    zlib data. Decompress here once so all callers agree.
+    """
+    data = path.read_bytes()
+    if data[:2] == b"\x1f\x8b":
+        return gzip.decompress(data)
+    return data
+
+
 def cmd_extract_btf(args: argparse.Namespace) -> int:
-    image = args.kernel.read_bytes()
+    image = load_raw_image(args.kernel)
     prefix = b"\x9f\xeb\x01\x00"
     candidates: list[tuple[int, int]] = []
     cursor = 0
@@ -1441,7 +1469,7 @@ def find_worker_schedule_call_sites(objdump: str) -> list[int]:
 
 def cmd_gen_p0(args: argparse.Namespace) -> int:
     probe_offset = parse_int(args.probe_offset)
-    image = args.kernel.read_bytes()
+    image = load_raw_image(args.kernel)
     page_offsets = [0x000, 0x200, 0x400, 0x600, 0x800, 0xA00, 0xC00, 0xE00]
     rows: list[tuple[int, list[int]]] = []
     for slide in [i * 0x10000 for i in range(32)]:

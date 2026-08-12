@@ -331,6 +331,43 @@ def main() -> None:
         assert "BUILD_FINGERPRINT does not contain AP build" in proc.stdout + proc.stderr
         print("PASS fingerprint provenance: --fingerprint fills the header; wrong-AP is a warning")
 
+        # 5. gzip-compressed kernel payloads (Mediatek 5.10/5.15, e.g. the a15x):
+        # extract-btf and gen-p0 must operate on the DECOMPRESSED Image, not the
+        # zlib stream. Feed both commands a gzip kernel file and require the same
+        # results as the raw Image path.
+        import gzip
+
+        from rmg_porter.cli import load_raw_image
+
+        raw = bytearray(0x200000)
+        for i in range(0, len(raw), 8):
+            raw[i:i + 8] = struct.pack("<Q", (0x1111111100000000 + i) & 0xFFFFFFFFFFFFFFFF)
+        fake_btf = build_btf()
+        raw[0x50000:0x50000 + len(fake_btf)] = fake_btf
+        raw_image = bytes(raw)
+        gz_path = w / PROFILE / "kernel.gz"
+        gz_path.write_bytes(gzip.compress(raw_image))
+        raw_path = w / PROFILE / "kernel.raw"
+        raw_path.write_bytes(raw_image)
+
+        assert load_raw_image(gz_path) == raw_image, "load_raw_image must decompress gzip kernels"
+        assert load_raw_image(raw_path) == raw_image
+        print("PASS load_raw_image: gzip-compressed kernel payload decompressed to the raw Image")
+
+        btf_gz = w / PROFILE / "vmlinux-gz.btf"
+        run(["extract-btf", "--kernel", str(gz_path), "--out", str(btf_gz)], cwd=REPO)
+        assert btf_gz.read_bytes() == fake_btf, "extract-btf must find the BTF blob inside the decompressed Image"
+        print("PASS extract-btf: raw BTF located inside a gzip-compressed kernel")
+
+        run(["gen-p0", "--kernel", str(gz_path), "--probe-offset", "0x1f0000",
+             "--out", str(w / PROFILE / "p0-gz.h")], cwd=REPO)
+        run(["gen-p0", "--kernel", str(raw_path), "--probe-offset", "0x1f0000",
+             "--out", str(w / PROFILE / "p0-raw.h")], cwd=REPO)
+        p0_gz = (w / PROFILE / "p0-gz.h").read_bytes()
+        p0_raw = (w / PROFILE / "p0-raw.h").read_bytes()
+        assert p0_gz == p0_raw, "gen-p0 over a gzip kernel must match the raw Image fingerprints"
+        print("PASS gen-p0: fingerprints from a gzip kernel match the raw Image")
+
         print("ALL PIPELINE CHECKS PASSED")
     finally:
         shutil.rmtree(work, ignore_errors=True)

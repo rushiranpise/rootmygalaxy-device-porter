@@ -8,8 +8,10 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import zipfile
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
@@ -179,6 +181,42 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--profile", required=True)
     p.set_defaults(func=cmd_checklist)
 
+    p = sub.add_parser(
+        "device-info",
+        help="Capture a connected adb device's identity and emit dispatch-ready port inputs as JSON",
+    )
+    p.add_argument("--serial", help="adb serial; defaults to the single connected device")
+    p.add_argument("--out", type=Path, help="JSON output path (default device-info-<model>-<AP>.json)")
+    p.add_argument(
+        "--display-name",
+        help="support feed display name (default 'Galaxy <model> | Kernel <kernel_version>')",
+    )
+    p.add_argument(
+        "--source-target",
+        help="existing target to scaffold from; required for dispatch (kernel-generation match recommended)",
+    )
+    p.add_argument(
+        "--kernelsu-artifact",
+        help="existing kernelsu/ ksud path to reuse; required for dispatch unless kernelsu_build=ddk",
+    )
+    p.add_argument(
+        "--version",
+        help="four-part firmware version; defaults to the device build, falls back to latest",
+    )
+    p.add_argument("--cp", help="CP part of the four-part version (defaults to the AP part)")
+    p.add_argument("--probe-offset", default="0x1f0000", help="P0 probe offset for p0_fingerprint.h")
+    p.add_argument(
+        "--check-update",
+        action="store_true",
+        help="run 'samloader check-update' and record the FUS latest version",
+    )
+    p.add_argument(
+        "--probe-fus",
+        action="store_true",
+        help="probe whether the device build is still served by Samsung FUS (short download probe)",
+    )
+    p.set_defaults(func=cmd_device_info)
+
     args = parser.parse_args(argv)
     try:
         return args.func(args)
@@ -232,6 +270,273 @@ def cmd_samloader_version(args: argparse.Namespace) -> int:
         )
     print(match.group(1))
     return 0
+
+
+# Marketing names for models seen in the payloads repo, used to build the
+# default feed display name when no --display-name is given.
+MARKETING_NAMES = {
+    "SM-A155N": "Galaxy A15",
+    "SM-S156V": "Galaxy A15 5G",
+    "SM-A366W": "Galaxy A36 5G",
+    "SM-A566E": "Galaxy A56 5G",
+    "SM-S721N": "Galaxy S24 FE",
+    "SM-S921B": "Galaxy S25",
+    "SM-S921N": "Galaxy S25",
+    "SM-S926B": "Galaxy S25+",
+    "SM-S928U": "Galaxy S24 Ultra",
+    "SM-S928U1": "Galaxy S24 Ultra",
+    "SM-S9180": "Galaxy S23 Ultra",
+    "SM-S9380": "Galaxy S25 Ultra",
+    "SM-S938N": "Galaxy S25 Ultra",
+    "SM-S9370": "Galaxy S25 Edge",
+    "SM-F966U": "Galaxy Z Fold 7",
+    "SM-F966U1": "Galaxy Z Fold 7",
+}
+
+# Device props captured by `device-info`. Keys become the JSON `device`
+# fields; values are the getprop names on Samsung builds.
+DEVICE_PROP_KEYS = {
+    "model": "ro.product.model",
+    "product_name": "ro.product.name",
+    "product_device": "ro.product.device",
+    "product_board": "ro.product.board",
+    "manufacturer": "ro.product.manufacturer",
+    "brand": "ro.product.brand",
+    "hardware": "ro.hardware",
+    "platform": "ro.board.platform",
+    "soc_manufacturer": "ro.soc.manufacturer",
+    "soc_model": "ro.soc.model",
+    "abi": "ro.product.cpu.abi",
+    "android_release": "ro.build.version.release",
+    "android_sdk": "ro.build.version.sdk",
+    "oneui_version": "ro.build.version.oneui",
+    "security_patch": "ro.build.version.security_patch",
+    "bootloader": "ro.bootloader",
+    "baseband": "ro.boot.baseband",
+    "fingerprint": "ro.build.fingerprint",
+    "boot_fingerprint": "ro.bootimage.build.fingerprint",
+    "incremental": "ro.build.version.incremental",
+    "csc_sales_code": "ro.csc.sales_code",
+    "csc_multi": "ro.omc.multi_csc",
+    "csc_country": "ro.csc.country_code",
+    "csc_version": "ro.omc.build.version",
+}
+
+
+def run_adb(serial: str, args: list[str], timeout: int = 30) -> str:
+    if shutil.which("adb") is None:
+        raise RuntimeError("adb not found on PATH; install Android platform-tools")
+    cmd = ["adb"] + (["-s", serial] if serial else []) + args
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"adb {' '.join(args[:2])} failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return proc.stdout
+
+
+def parse_getprop(text: str) -> dict[str, str]:
+    props: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.match(r"\[([^\]]+)\]:\s*\[([^\]]*)\]", line)
+        if match:
+            props[match.group(1)] = match.group(2)
+    return props
+
+
+def build_four_part(ap: str, csc_version: str, cp: str | None = None) -> str | None:
+    """Samsung four-part version: AP/CSC/CP/AP.
+
+    The device exposes its own CSC firmware version (ro.omc.build.version,
+    e.g. S156VTFNBDZDC), so the CSC part needs no guess. The CP part defaults
+    to the AP part; pass --cp when the CP differs (some models ship a separate
+    baseband build).
+    """
+    if not ap or not csc_version:
+        return None
+    cp = cp or ap
+    return f"{ap}/{csc_version}/{cp}/{ap}"
+
+
+def device_profile(product_device: str, ap: str) -> str | None:
+    if product_device and ap:
+        return f"{product_device}-{ap}"
+    return None
+
+
+def kernel_short(release: str) -> str | None:
+    match = re.match(r"(\d+\.\d+\.\d+)", release or "")
+    return match.group(1) if match else None
+
+
+def samloader_check_update(model: str, region: str) -> str | None:
+    if shutil.which("samloader") is None:
+        raise RuntimeError("samloader not found on PATH; install samloader-rs")
+    proc = subprocess.run(
+        ["samloader", "check-update", "--model", model, "--region", region],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    match = re.search(FOUR_PART_VERSION, proc.stdout + proc.stderr)
+    if not match:
+        print(
+            f"note: samloader check-update returned no version for {model}/{region} "
+            f"(rc={proc.returncode})",
+            file=sys.stderr,
+        )
+        return None
+    return match.group(0)
+
+
+def samloader_probe(model: str, region: str, version: str) -> bool:
+    """Return True when Samsung FUS still serves the exact four-part version.
+
+    A valid version makes samloader print the firmware version and start
+    streaming; a retired build fails fast with an error. The download is
+    killed by the timeout, so only a few hundred KB ever land in a temp dir.
+    """
+    if shutil.which("samloader") is None:
+        raise RuntimeError("samloader not found on PATH; install samloader-rs")
+    text = ""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "probe.zip"
+        try:
+            proc = subprocess.run(
+                [
+                    "samloader",
+                    "download",
+                    "--model",
+                    model,
+                    "--region",
+                    region,
+                    "--version",
+                    version,
+                    "--out-file",
+                    str(out),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+            text = proc.stdout + proc.stderr
+        except subprocess.TimeoutExpired as exc:
+            # Timeout is the expected success path: streaming started.
+            text = (exc.stdout or "") + (exc.stderr or "")
+    return bool(re.search(r"Firmware Version:", text))
+
+
+def cmd_device_info(args: argparse.Namespace) -> int:
+    serial = args.serial
+    if not serial:
+        devices = [
+            line.split()[0]
+            for line in run_adb("", ["devices"]).splitlines()[1:]
+            if line.strip() and line.split()[-1] == "device"
+        ]
+        if len(devices) != 1:
+            raise ValueError(
+                f"expected exactly one connected device, found {len(devices)}: {devices}; pass --serial"
+            )
+        serial = devices[0]
+
+    props = parse_getprop(run_adb(serial, ["shell", "getprop"]))
+    device: dict[str, object] = {}
+    for key, prop in DEVICE_PROP_KEYS.items():
+        device[key] = props.get(prop, "")
+    device["page_size"] = int(
+        run_adb(serial, ["shell", "getconf", "PAGE_SIZE"]).strip() or 0
+    )
+    device["kernel_release"] = run_adb(serial, ["shell", "uname", "-r"]).strip()
+    device["kernel_version"] = kernel_short(str(device["kernel_release"])) or ""
+
+    model = str(device["model"])
+    region = str(device["csc_sales_code"])
+    ap = str(device["incremental"])
+    four_part = build_four_part(ap, str(device["csc_version"]), args.cp)
+
+    firmware: dict[str, object] = {
+        "model": model,
+        "region": region,
+        "device_build_4part": four_part,
+    }
+    if args.check_update:
+        firmware["fus_latest_4part"] = samloader_check_update(model, region)
+    if args.probe_fus and four_part:
+        firmware["fus_serves_device_build"] = samloader_probe(model, region, four_part)
+
+    profile = device_profile(str(device["product_device"]), ap)
+    display_name = args.display_name or (
+        f"{MARKETING_NAMES.get(model, f'Galaxy {model}')} | "
+        f"Kernel {device['kernel_version']}"
+        if device["kernel_version"]
+        else MARKETING_NAMES.get(model, f"Galaxy {model}")
+    )
+    version = args.version or four_part or "latest"
+    if four_part and firmware.get("fus_serves_device_build") is False:
+        print(
+            f"note: device build {four_part} is no longer served by FUS; "
+            f"the dispatch falls back to 'latest' -- update the device first or pass --version",
+            file=sys.stderr,
+        )
+        version = "latest"
+
+    dispatch: dict[str, object] = {
+        "profile": profile,
+        "payload_id": profile,
+        "model": model,
+        "region": region,
+        "version": version,
+        "fingerprint": device["fingerprint"],
+        "kernel_version": device["kernel_version"],
+        "kernel_release": device["kernel_release"],
+        "display_name": display_name,
+        "source_target": args.source_target
+        or "<set me: same kernel generation (e.g. dm3q for 5.15)>",
+        "kernelsu_artifact": args.kernelsu_artifact
+        or "<set me: reuse a ksud for this KMI or use kernelsu_build=ddk>",
+        "probe_offset": args.probe_offset,
+        "require_btf": True,
+    }
+
+    info: dict[str, object] = {
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "adb_serial": serial,
+        "device": device,
+        "firmware": firmware,
+        "dispatch": dispatch,
+    }
+    out_path = args.out or Path(f"device-info-{model}-{ap}.json")
+    out_path.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {out_path}")
+    print_device_info_summary(info)
+    return 0
+
+
+def print_device_info_summary(info: dict[str, object]) -> None:
+    d = info["device"]
+    fw = info["firmware"]
+    print("=" * 62)
+    print(f"model          {d['model']}  (device {d['product_device']})")
+    print(f"region/CSC     {d['csc_sales_code']}  (multi-CSC {d['csc_multi']})")
+    print(
+        f"android        {d['android_release']}  SDK {d['android_sdk']}  "
+        f"One UI {d['oneui_version']}"
+    )
+    print(f"kernel         {d['kernel_release']}")
+    print(f"soc            {d['soc_manufacturer']} {d['soc_model']}  pages {d['page_size']}")
+    print(f"fingerprint    {d['fingerprint']}")
+    if fw.get("device_build_4part"):
+        print(f"firmware 4-part {fw['device_build_4part']}")
+    if fw.get("fus_latest_4part"):
+        print(f"FUS latest     {fw['fus_latest_4part']}")
+    if fw.get("fus_serves_device_build") is not None:
+        print(f"FUS serves dev build: {fw['fus_serves_device_build']}")
+    print("-" * 62)
+    print("workflow dispatch inputs:")
+    for key, value in info["dispatch"].items():
+        print(f"  {key:<16} {value}")
 
 
 def cmd_extract_kernel(args: argparse.Namespace) -> int:

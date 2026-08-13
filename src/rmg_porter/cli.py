@@ -1620,6 +1620,42 @@ def cmd_write_port_doc(args: argparse.Namespace) -> int:
     return 0
 
 
+def payloads_owner(repo: Path) -> str:
+    """Return the GitHub owner of the payloads repo checkout (e.g. 'BuSung-dev')
+    so feed artifact URLs point at the repo the PR actually targets. Falls back to
+    the upstream owner when the checkout has no usable remote."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "remote"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.split()
+    except (subprocess.SubprocessError, OSError):
+        out = []
+    owners = []
+    for remote in out or ["origin"]:
+        try:
+            url = subprocess.run(
+                ["git", "-C", str(repo), "remote", "get-url", remote],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            continue
+        match = re.search(r"github\.com[:/]([^/]+)/Root-My-Galaxy-Payloads(?:\.git)?$", url)
+        if match:
+            owners.append(match.group(1))
+    # In CI the fork is the only remote ('origin'). In a local checkout the
+    # fork may be a named remote alongside upstream; prefer the fork over
+    # upstream so URLs point at the repo the PR targets.
+    for owner in owners:
+        if owner != "BuSung-dev":
+            return owner
+    return owners[0] if owners else "BuSung-dev"
+
+
 def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     repo = args.payloads_repo
     payload_id = args.payload_id or args.profile
@@ -1631,6 +1667,7 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     existing = existing_entries[0] if existing_entries else {}
     exploit_rel = args.exploit_path.resolve().relative_to(repo.resolve()).as_posix()
     kernelsu_rel = args.kernelsu_path.resolve().relative_to(repo.resolve()).as_posix()
+    raw_prefix = f"https://raw.githubusercontent.com/{payloads_owner(repo)}/Root-My-Galaxy-Payloads/main/"
     entry = {
         "payloadId": payload_id,
         "displayName": existing.get("displayName", args.display_name)
@@ -1643,11 +1680,11 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
         if args.preserve_existing_metadata
         else sorted(set(args.kernel_version)),
         "exploit": {
-            "url": f"https://raw.githubusercontent.com/BuSung-dev/Root-My-Galaxy-Payloads/main/{exploit_rel}",
+            "url": f"{raw_prefix}{exploit_rel}",
             "size": args.exploit_path.stat().st_size,
         },
         "kernelsu": {
-            "url": f"https://raw.githubusercontent.com/BuSung-dev/Root-My-Galaxy-Payloads/main/{kernelsu_rel}",
+            "url": f"{raw_prefix}{kernelsu_rel}",
             "size": args.kernelsu_path.stat().st_size,
         },
     }

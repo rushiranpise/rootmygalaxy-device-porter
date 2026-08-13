@@ -231,6 +231,18 @@ def main() -> None:
         else:
             raise AssertionError("replaced s25 entry not found")
         print("PASS add-feed-entry replace: middle entry updated in place, feed stays valid JSON")
+        # no-kernelsu path (kernelsu_build=none / pre-GKI ports): the entry must
+        # be created without a kernelsu field and still validate
+        run(["add-feed-entry", "--payloads-repo", str(payloads), "--profile", "b2q-no-ksu-test",
+             "--payload-id", "b2q-no-ksu-test",
+             "--display-name", "Z Flip 3 (no KernelSU) | Kernel 5.4.274",
+             "--model", "SM-F711U1", "--kernel-version", "5.4.274",
+             "--exploit-path", str(payloads / "artifacts" / PROFILE / "cve-2026-43499-app.so")], cwd=REPO)
+        feed_data = json.loads((payloads / "support" / "targets-v3.json").read_text(encoding="utf-8"))
+        no_ksu = [p for p in feed_data["payloads"] if p["payloadId"] == "b2q-no-ksu-test"]
+        assert len(no_ksu) == 1 and "kernelsu" not in no_ksu[0], no_ksu
+        assert "exploit" in no_ksu[0]
+        print("PASS add-feed-entry without kernelsu: entry has no kernelsu field, feed stays valid JSON")
         run(["validate-feed", "--payloads-repo", str(payloads)], cwd=REPO)
         run(["validate-port", "--payloads-repo", str(payloads), "--profile", PROFILE,
              "--version", FOUR_PART, "--kernel-version", KERNEL_VERSION,

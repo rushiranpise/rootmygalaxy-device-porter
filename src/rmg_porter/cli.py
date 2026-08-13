@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--model", required=True, action="append")
     p.add_argument("--kernel-version", required=True, action="append")
     p.add_argument("--exploit-path", required=True, type=Path)
-    p.add_argument("--kernelsu-path", required=True, type=Path)
+    p.add_argument("--kernelsu-path", type=Path)
     p.add_argument("--preserve-existing-metadata", action="store_true")
     p.add_argument("--requires-fresh-p0-session", action="store_true")
     p.set_defaults(func=cmd_add_feed_entry)
@@ -1666,7 +1666,6 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
     existing_entries = [p for p in data.get("payloads", []) if p.get("payloadId") == payload_id]
     existing = existing_entries[0] if existing_entries else {}
     exploit_rel = args.exploit_path.resolve().relative_to(repo.resolve()).as_posix()
-    kernelsu_rel = args.kernelsu_path.resolve().relative_to(repo.resolve()).as_posix()
     raw_prefix = f"https://raw.githubusercontent.com/{payloads_owner(repo)}/Root-My-Galaxy-Payloads/main/"
     entry = {
         "payloadId": payload_id,
@@ -1683,11 +1682,15 @@ def cmd_add_feed_entry(args: argparse.Namespace) -> int:
             "url": f"{raw_prefix}{exploit_rel}",
             "size": args.exploit_path.stat().st_size,
         },
-        "kernelsu": {
+    }
+    # KernelSU is optional: pre-GKI kernels (e.g. Samsung 5.4) cannot run
+    # ksud at all, so a port can legitimately ship without a kernelsu entry.
+    if args.kernelsu_path and args.kernelsu_path.exists():
+        kernelsu_rel = args.kernelsu_path.resolve().relative_to(repo.resolve()).as_posix()
+        entry["kernelsu"] = {
             "url": f"{raw_prefix}{kernelsu_rel}",
             "size": args.kernelsu_path.stat().st_size,
-        },
-    }
+        }
     if args.preserve_existing_metadata and "requiresFreshP0Session" in existing:
         entry["requiresFreshP0Session"] = existing["requiresFreshP0Session"]
     elif args.requires_fresh_p0_session:
@@ -1790,6 +1793,8 @@ def cmd_validate_feed(args: argparse.Namespace) -> int:
     errors = 0
     for payload in data.get("payloads", []):
         for field in ("exploit", "kernelsu"):
+            if field not in payload:
+                continue  # kernelsu is optional (pre-GKI ports ship without it)
             asset = payload[field]
             size = int(asset["size"])
             local = local_path_from_raw_url(args.payloads_repo, asset["url"])

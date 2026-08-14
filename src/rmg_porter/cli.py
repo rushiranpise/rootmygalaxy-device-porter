@@ -2179,14 +2179,18 @@ def parse_nm(path: Path) -> dict[str, int]:
         parts = line.split()
         if len(parts) >= 3 and re.fullmatch(r"[0-9a-fA-F]+", parts[0]):
             name = parts[-1]
-            # Samsung mangles kallsyms names with a $<32-hex> hash suffix
-            # (e.g. worker_thread$f31e2447a3fdcb60f4b193f95acd647c). .cfi_jt
-            # entries are CFI jump-table thunks, not the real functions. The
-            # nm dump is address-sorted, so keeping the first occurrence of
-            # each de-mangled name yields the real function address.
+            # Two vendor mangling schemes appear in recovered vmlinux nm dumps:
+            #   1. Samsung kallsyms:  worker_thread$f31e2447a3fdcb60f4b193f95acd647c
+            #   2. LLVM LTO (Exynos clang builds):
+            #        configfs_read_iter.llvm.7975549056694209793
+            # .cfi_jt entries are CFI jump-table thunks, not the real
+            # functions. The nm dump is address-sorted, so keeping the first
+            # occurrence of each de-mangled name yields the real function
+            # address.
             if ".cfi_jt" in name:
                 continue
             name = re.sub(r"\$[0-9a-f]{32}$", "", name)
+            name = re.sub(r"\.llvm\.[0-9]+", "", name)
             if name not in symbols:
                 symbols[name] = int(parts[0], 16)
     return symbols

@@ -452,9 +452,26 @@ def cmd_device_info(args: argparse.Namespace) -> int:
     device["kernel_release"] = run_adb(serial, ["shell", "uname", "-r"]).strip()
     device["kernel_version"] = kernel_short(str(device["kernel_release"])) or ""
     # pre-GKI kernels (e.g. Samsung 5.4) never ship BTF; probe the live kernel
-    # so dispatch defaults match reality instead of always demanding BTF
-    btf_probe = run_adb(serial, ["shell", "ls", "/sys/kernel/btf/vmlinux"]).strip()
-    device["kernel_ships_btf"] = bool(btf_probe) and "No such file" not in btf_probe
+    # so dispatch defaults match reality instead of always demanding BTF.
+    # `test -r` through the remote shell exits 0 when the node exists and is
+    # readable; a permission-denied node simply reports False instead of
+    # making the whole adb invocation fail (ls -r 1 is not a probe failure).
+    btf_probe = run_adb(
+        serial,
+        [
+            "shell",
+            "test",
+            "-r",
+            "/sys/kernel/btf/vmlinux",
+            "&&",
+            "echo",
+            "btf-ok",
+            "||",
+            "echo",
+            "btf-no",
+        ],
+    ).strip()
+    device["kernel_ships_btf"] = "btf-ok" in btf_probe
 
     model = str(device["model"])
     region = str(device["csc_sales_code"])

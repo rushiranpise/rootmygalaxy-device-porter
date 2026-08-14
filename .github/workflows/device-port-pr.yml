@@ -227,10 +227,12 @@ jobs:
             > ".work/${{ inputs.profile }}/worker_thread.objdump" || true
           if ! grep -qE '^\s*[0-9a-f]{16}:' ".work/${{ inputs.profile }}/worker_thread.objdump"; then
             # a failed --disassemble-symbols run still writes a non-empty header,
-            # so detect missing disassembly by the absence of address lines. When
-            # Samsung mangles kallsyms names with a $<32-hex> hash suffix
-            # (worker_thread$f31e...), retry with the real symbol name.
-            mangled="$(grep -Eo 'worker_thread\$[0-9a-f]{32}' ".work/${{ inputs.profile }}/vmlinux.nm" | head -1)"
+            # so detect missing disassembly by the absence of address lines.
+            # Vendor kernels mangle kallsyms names in two ways: Samsung's
+            # $<32-hex> hash (worker_thread$f31e...) and LLVM LTO's
+            # .llvm.<digits> suffix (worker_thread.llvm.7975...). Retry with
+            # the real symbol name for whichever scheme is present.
+            mangled="$(grep -Eo 'worker_thread(\$[0-9a-f]{32}|\.llvm\.[0-9]+)' ".work/${{ inputs.profile }}/vmlinux.nm" | head -1)"
             if [ -n "$mangled" ]; then
               llvm-objdump --disassemble-symbols="$mangled" \
                 ".work/${{ inputs.profile }}/vmlinux.elf" \
